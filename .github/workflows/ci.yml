@@ -1,0 +1,127 @@
+name: SDK checks
+on:
+  pull_request:
+    branches: [dev, prod]
+  push:
+    branches: [prod]
+permissions:
+  contents: read
+concurrency:
+  group: sdk-go-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  production-merge:
+    permissions:
+      contents: read
+      pull-requests: read
+    if: github.event_name == 'push' && github.event.created == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Require the merged dev to prod pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            count=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls?per_page=100" --jq '[.[] | select(.merged_at != null and .merge_commit_sha == env.GITHUB_SHA and .base.ref == "prod" and .head.ref == "dev" and .base.repo.full_name == env.GITHUB_REPOSITORY and .head.repo.full_name == env.GITHUB_REPOSITORY)] | length')
+            if [ "$count" -gt 0 ]; then exit 0; fi
+            sleep 2
+          done
+          echo "::error::Production CI requires this exact commit to be a merged dev to prod PR in this repository."
+          exit 1
+  checks:
+    needs: production-merge
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.production-merge.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        go: ['1.26.8', '1.27.1']
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Formatting, module checksums and embedded artifact
+        run: |
+          test -z "$(gofmt -l .)"
+          go mod verify
+          cd internal/wasm && sha256sum -c SHA256SUMS
+      - name: Tests and static checks
+        run: |
+          go test -count=1 ./...
+          go vet ./...
+      - name: Cross compile without cgo
+        run: |
+          GOOS=linux GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=windows GOARCH=amd64 go build ./...
+  core:
+    needs: production-merge
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.production-merge.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '0'
+      # The committed module was built with clang 16: the same compiler gives the same bytes.
+      CC_wasm32_wasip1: clang-16
+      AR_wasm32_wasip1: llvm-ar-16
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: sdk-go
+          persist-credentials: false
+      - name: The sdk-rust revision the embedded module was built from
+        id: source
+        working-directory: sdk-go
+        run: |
+          revision=$(awk '$1 == "sdk-rust" { print $2 }' internal/wasm/SOURCE)
+          if ! [[ $revision =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::internal/wasm/SOURCE names no committed sdk-rust revision"
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: iceroot-network/sdk-rust
+          ref: ${{ steps.source.outputs.revision }}
+          path: sdk-rust
+          token: ${{ secrets.SDK_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: '1.98.0'
+          targets: wasm32-wasip1
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: sdk-go/go.sum
+      - name: Install clang and llvm-ar for the WebAssembly build
+        run: |
+          command -v clang-16 >/dev/null && command -v llvm-ar-16 >/dev/null ||
+            (sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-16 llvm-16)
+      - name: Read access to heartwood-core
+        env:
+          HEARTWOOD_TOKEN: ${{ secrets.HEARTWOOD_TOKEN }}
+        run: sdk-rust/tools/ci/heartwood-access.sh
+      - name: The embedded module rebuilds to the same bytes
+        working-directory: sdk-go
+        run: |
+          scripts/build-wasm.sh
+          if ! git diff --exit-code -- internal/wasm; then
+            echo "::error::The module built from the recorded sdk-rust revision differs from the committed one"
+            exit 1
+          fi
+      - name: Tests, vectors, differential tests and notices
+        working-directory: sdk-go
+        run: |
+          go test -count=1 ./...
+          scripts/test-vectors.sh
+          scripts/test-cross-language.sh
+          python3 scripts/notice.py --check
