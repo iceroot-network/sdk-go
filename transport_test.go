@@ -531,6 +531,7 @@ func TestNodeText(t *testing.T) {
 		"a­b c":                `a\u{ad}b\u{2003}c`,
 		"":                     "",
 		"\xff":                 `\u{fffd}`,
+		"a\uFFFDb\xffc":        "a\uFFFDb\\u{fffd}c",
 		strings.Repeat("é", 5): strings.Repeat("é", 5),
 	} {
 		if got := nodeText(text); got != want {

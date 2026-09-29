@@ -453,15 +453,19 @@ func unavailable(what string, cause error) error {
 // maxNodeText is the most characters of a relay's own text an error keeps, as in the core.
 const maxNodeText = 200
 
-// nodeText is text a relay chose, as an error keeps it: control, format and separator characters,
-// which can hide or reorder what is shown, written as escapes (\u{202e}), as are bytes that are
-// not UTF-8, and at most maxNodeText characters, escapes included, then "…".
+// nodeText is text a relay chose, as an error keeps it: control, format and separator characters
+// and every space but the ASCII space, which can hide or reorder what is shown, written as escapes
+// (\u{202e}), as are bytes that are not UTF-8 (\u{fffd}), and at most maxNodeText characters,
+// escapes included, then "…".
 func nodeText(text string) string {
 	var out strings.Builder
 	count := 0
-	for _, r := range text {
+	for i, r := range text {
 		piece := string(r)
-		if r == utf8.RuneError || unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) || (r > unicode.MaxASCII && unicode.Is(unicode.Zs, r)) {
+		// A byte that is not UTF-8 reads as the replacement character, which is kept as itself
+		// where the text holds it.
+		invalid := r == utf8.RuneError && !strings.HasPrefix(text[i:], "\uFFFD")
+		if invalid || hidden(r) {
 			piece = fmt.Sprintf("\\u{%x}", r)
 		}
 		width := utf8.RuneCountInString(piece)
@@ -473,6 +477,13 @@ func nodeText(text string) string {
 		out.WriteString(piece)
 	}
 	return out.String()
+}
+
+// hidden reports whether r can hide or reorder what is shown: a control or format character
+// (Unicode categories Cc and Cf), a line or paragraph separator (Zl, Zp), or a space other than the
+// ASCII space (Zs).
+func hidden(r rune) bool {
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) || (r != ' ' && unicode.Is(unicode.Zs, r))
 }
 
 // prepare has the core write the request of a node API operation.
