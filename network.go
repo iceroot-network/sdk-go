@@ -456,7 +456,7 @@ const maxNodeText = 200
 // nodeText is text a relay chose, as an error keeps it: control, format and separator characters
 // and every space but the ASCII space, which can hide or reorder what is shown, written as escapes
 // (\u{202e}), as are bytes that are not UTF-8 (\u{fffd}), and at most maxNodeText characters,
-// escapes included, then "…".
+// escapes included, then "…". These are the characters the core escapes in a node's text.
 func nodeText(text string) string {
 	var out strings.Builder
 	count := 0

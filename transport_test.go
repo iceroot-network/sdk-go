@@ -547,3 +547,71 @@ func TestNodeText(t *testing.T) {
 		t.Fatal(cut)
 	}
 }
+
+// The core keeps a node's text as the transport keeps a relay's: every character nodeText escapes,
+// and no other, is escaped in the text of a node's refusal.
+func TestTheCoreEscapesANodesTextAsTheTransportDoes(t *testing.T) {
+	ctx := context.Background()
+	s := testSDK(t)
+	// kept is text as the core keeps it in the details of a node's refusal.
+	kept := func(text string) string {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"statusCode": 422, "error": "Unprocessable Entity", "message": text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = s.call(ctx, "apiDecode", map[string]any{"seats": 53, "operation": "nodeStatus", "args": map[string]any{}, "status": 422, "headers": [][2]string{}, "body": string(body)}, nil)
+		var e *Error
+		if !errors.As(err, &e) || e.Code != "Refused" {
+			t.Fatal(err)
+		}
+		var details struct {
+			Message string `json:"message"`
+		}
+		if err = json.Unmarshal(e.Details, &details); err != nil {
+			t.Fatal(err)
+		}
+		return details.Message
+	}
+	compare := func(text string) {
+		t.Helper()
+		if kept(text) == nodeText(text) {
+			return
+		}
+		for _, r := range text {
+			if core, host := kept(string(r)), nodeText(string(r)); core != host {
+				t.Fatalf("the core keeps %U as %+q, the transport as %+q", r, core, host)
+			}
+		}
+		t.Fatalf("the core keeps %+q as %+q, the transport as %+q", text, kept(text), nodeText(text))
+	}
+	// Every scalar value of the planes that hold characters other than private use ones (planes 0
+	// to 3 and 14), and the first and last of the others, in pieces that nodeText does not cut.
+	var piece strings.Builder
+	width := 0
+	add := func(r rune) {
+		if !utf8.ValidRune(r) {
+			return
+		}
+		w := utf8.RuneCountInString(nodeText(string(r)))
+		if width+w > maxNodeText {
+			compare(piece.String())
+			piece.Reset()
+			width = 0
+		}
+		piece.WriteRune(r)
+		width += w
+	}
+	for plane := rune(0); plane <= 16; plane++ {
+		first, last := plane<<16, plane<<16|0xffff
+		if plane > 3 && plane != 14 {
+			add(first)
+			add(last)
+			continue
+		}
+		for r := first; r <= last; r++ {
+			add(r)
+		}
+	}
+	compare(piece.String())
+}

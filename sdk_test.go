@@ -272,6 +272,66 @@ func TestMemoryAndConcurrency(t *testing.T) {
 		t.Fatal("closed runtime succeeded")
 	}
 }
+func TestAVoteReasonEscapesRunsOfSpacesInDeclaredNames(t *testing.T) {
+	ctx := context.Background()
+	s := testSDK(t)
+	// 25 seated validators that declare one operator and one hosting provider, whose names have
+	// runs of spaces.
+	records := make([]map[string]any, 25)
+	for i := range records {
+		records[i] = map[string]any{
+			"name": "node" + string(rune('a'+i)), "address": fmt.Sprintf("addr-%d", i), "rank": 1 + i, "seated": true, "status": "active",
+			"registeredHeight": "1", "seatedDaysInWindow": 30, "voteWeight": "1000", "voters": 1,
+			"production":   map[string]any{"forged": 100, "assigned": 100},
+			"penalties":    map[string]any{"jailedInWindow": false, "equivocationInWindow": false, "ever": false},
+			"declarations": map[string]any{"operator": "Frost   line", "hosting": "Metal  box", "country": "NL", "complete": true},
+			"payouts":      map[string]any{"perUnitWeight": "10", "intervals": 30}, "selfFundedWeightBp": 0,
+		}
+	}
+	snapshot, err := json.Marshal(map[string]any{"height": "5000000", "windowDays": 30, "seats": 53, "blockTimeSeconds": 8, "source": "indexer", "records": records})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := map[string]any{"minEntries": 20, "maxEntries": 53, "maxEntryBasisPoints": 500, "maxBytes": 1280, "names": "lowercase-letters", "validatorsMayVote": false}
+	request, err := json.Marshal(map[string]any{"mode": "diversity", "account": "holder", "count": 20, "draw": 1, "rules": rules})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Vote(ctx, "select", string(snapshot), string(request), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selection struct {
+		Entries []struct {
+			Reasons []struct {
+				Kind  string `json:"kind"`
+				Value string `json:"value"`
+				Text  string `json:"text"`
+			} `json:"reasons"`
+		} `json:"entries"`
+	}
+	if err = json.Unmarshal(result, &selection); err != nil {
+		t.Fatal(err)
+	}
+	// The value keeps the name as declared; the sentence escapes each space of a run.
+	quoted := map[string]string{"Frost   line": `"Frost\u{20}\u{20}\u{20}line"`, "Metal  box": `"Metal\u{20}\u{20}box"`}
+	seen := map[string]bool{}
+	for _, entry := range selection.Entries {
+		for _, reason := range entry.Reasons {
+			want, declared := quoted[reason.Value]
+			if reason.Kind != "group" || !declared {
+				continue
+			}
+			seen[reason.Value] = true
+			if !strings.Contains(reason.Text, want) || strings.Contains(reason.Text, "  ") {
+				t.Fatalf("%q %q", reason.Value, reason.Text)
+			}
+		}
+	}
+	if len(seen) != len(quoted) {
+		t.Fatal("no pick shares the operator or the hosting provider", string(result))
+	}
+}
 func TestFinalityIsNotConfirmations(t *testing.T) {
 	s := testSDK(t)
 	n := &Network{sdk: s, profile: Devnet()}

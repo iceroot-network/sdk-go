@@ -5,7 +5,7 @@ clang 16. Source builds use the release flags in `scripts/build-wasm.sh`. These 
 BIP340 measurements; a later post-quantum core must be measured again. The machine also runs
 other work, so timings are observations rather than service guarantees.
 
-The embedded production module is 1,178,969 bytes, or 400,860 bytes with `gzip -n -9`.
+The embedded production module is 1,182,472 bytes, or 402,442 bytes with `gzip -n -9`.
 Its checksum is in `internal/wasm/SHA256SUMS`, and the sdk-rust revision it was built from in
 `internal/wasm/SOURCE`; a build of that revision from a clean export, at another path and with an
 empty target directory, gave the same bytes. It includes key derivation, transaction handling,
@@ -16,8 +16,8 @@ in this artifact and is tested as a rejection.
 
 | Operation | Three runs, milliseconds per operation | Median throughput |
 | --- | --- | --- |
-| Sign a message | 3.048, 2.585, 2.521 | about 390 per second |
-| Sign a portable transfer draft | 9.505, 9.410, 9.488 | about 105 per second |
+| Sign a message | 2.373, 2.303, 2.275 | about 430 per second |
+| Sign a portable transfer draft | 8.839, 8.737, 8.700 | about 114 per second |
 
 These include Go/JSON/WASI crossing, response parsing and buffer and stack wiping. Transfer
 signing also deserializes and validates the draft and returns its serialized form, node JSON,

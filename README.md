@@ -66,7 +66,11 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
   `json.RawMessage`; wide integers remain decimal strings.
 - `Vote`: `select`, `evaluate`, `check`, `validate`, `split`, `voter`, `validateSnapshot`, using
   the shared JSON schemas in the [Rust binding documentation](https://github.com/iceroot-network/sdk-rust/tree/dev/crates/iceroot-sdk-bindings).
-  `Network.Info().VoteRules` supplies the network's rules for the next block.
+  `Network.Info().VoteRules` supplies the network's rules for the next block. Each reason's
+  `text` is a sentence for the review screen. A validator's declared names appear in it in
+  quotes, written as Rust writes a string literal (control, invisible and direction characters,
+  every space but the ASCII space, quotes and backslashes escaped), with every space of a run of
+  two or more ASCII spaces written `\u{20}`. Show it on one line, or indent its continuation.
 
 `Connect` tries the configured relays until connected and pins the chain identity. It checks the
 crypto configuration and the node configuration against that identity. A connection then sends
