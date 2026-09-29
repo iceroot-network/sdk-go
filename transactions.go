@@ -35,18 +35,63 @@ func (s *SDK) BuildOffline(ctx context.Context, p Profile, configuration json.Ra
 	err := s.call(ctx, "draftBuild", map[string]any{"profile": p, "configuration": configuration, "request": request, "facts": facts}, &out)
 	return out, err
 }
+
+// DeserializeDraft reads a serialized draft for p, whose network hash must be pinned; a draft for
+// another profile or network is refused. The summary is computed again from the transaction's own
+// fields. p is all the reader has, so the fee's floor is computed under the network configuration
+// the draft carries, which the pinned network hash does not cover: a fee the draft calls the floor
+// reads "unverified", never "floor", and the floor beside it is for display only. Show such a fee
+// as an amount, never as the network's minimum. A reader connected to the network uses
+// Network.DeserializeDraft instead.
 func (s *SDK) DeserializeDraft(ctx context.Context, p Profile, data []byte) (Draft, error) {
+	return s.readDraft(ctx, p, nil, data)
+}
+
+// DeserializeDraft reads a serialized draft on the connection's chain: a draft built under another
+// network configuration (another fee table, other rules or other labels) is refused with
+// NetworkMismatch, whose details name the reason "configuration", and a fee at the floor of this
+// chain reads "floor". That floor is the one at the draft's height, which the builder chose: where
+// a milestone between it and the network's next block changes the fee table, show the fee as an
+// amount.
+func (n *Network) DeserializeDraft(ctx context.Context, data []byte) (Draft, error) {
+	return n.sdk.readDraft(ctx, n.profile, n.configuration, data)
+}
+
+// readDraft reads data for p, on the chain of configuration when it is given.
+func (s *SDK) readDraft(ctx context.Context, p Profile, configuration json.RawMessage, data []byte) (Draft, error) {
 	d := Draft{Serialized: hex.EncodeToString(data)}
-	err := s.call(ctx, "draftRead", map[string]any{"profile": p, "serialized": d.Serialized}, &d.Summary)
+	args := map[string]any{"profile": p, "serialized": d.Serialized}
+	if configuration != nil {
+		args["configuration"] = configuration
+	}
+	err := s.call(ctx, "draftRead", args, &d.Summary)
 	return d, err
 }
 func (d Draft) Serialize() ([]byte, error) { return hex.DecodeString(d.Serialized) }
+
+// Sign reads the draft again for p and signs what it read with key, and with second when the
+// sender has a second key.
 func (d Draft) Sign(ctx context.Context, p Profile, key, second *Account) (SignedTransaction, error) {
+	return d.sign(ctx, p, nil, key, second)
+}
+
+// SignDraft signs d as Draft.Sign does, reading it on the connection's chain: a draft built under
+// another network configuration is refused with NetworkMismatch before anything is signed. The
+// keys may belong to another runtime than the connection's.
+func (n *Network) SignDraft(ctx context.Context, d Draft, key, second *Account) (SignedTransaction, error) {
+	return d.sign(ctx, n.profile, n.configuration, key, second)
+}
+
+// sign signs d for p, on the chain of configuration when it is given.
+func (d Draft) sign(ctx context.Context, p Profile, configuration json.RawMessage, key, second *Account) (SignedTransaction, error) {
 	var out SignedTransaction
 	if key == nil {
 		return out, &Error{Code: "InvalidKey", Message: "signing account is required"}
 	}
 	args := map[string]any{"profile": p, "serialized": d.Serialized, "key": key.handle}
+	if configuration != nil {
+		args["configuration"] = configuration
+	}
 	if second != nil {
 		if second.sdk != key.sdk {
 			return out, &Error{Code: "InvalidKey", Message: "second key belongs to another runtime"}

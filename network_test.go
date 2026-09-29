@@ -3,6 +3,7 @@ package iceroot
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -164,6 +165,77 @@ func TestOversizedResponseAndRateLimitCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err = n.send(ctx, nodeRequest{Method: "GET", Target: "/limited"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+}
+
+func TestADraftIsReadOnTheConnectionsChain(t *testing.T) {
+	ctx := context.Background()
+	s := testSDK(t)
+	relay := newTestRelay(t, nil)
+	net, err := s.Connect(ctx, Devnet(relay.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The key is held by another runtime, as an isolated signer's is.
+	offline := testSDK(t)
+	a, err := offline.FromLegacyPassphrase(ctx, net.Profile(), "probe passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Release(ctx)
+	facts := OnlineFacts{Sender: a.PublicKey, Nonce: "1", Height: 81}
+	built, err := s.BuildOffline(ctx, net.Profile(), net.configuration, transferTo(a.Address, "1"), facts)
+	if err != nil || built.Summary.Fee.Source != "floor" {
+		t.Fatal(built.Summary.Fee, err)
+	}
+	data, err := built.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With the profile alone the floor is unverified; on the connection's chain it is the floor.
+	if read, err := offline.DeserializeDraft(ctx, net.Profile(), data); err != nil || read.Summary.Fee.Source != "unverified" {
+		t.Fatal(read.Summary.Fee, err)
+	}
+	read, err := net.DeserializeDraft(ctx, data)
+	if err != nil || read.Summary.Fee.Source != "floor" || read.Summary.Fee.Amount != built.Summary.Fee.Amount || *read.Summary.Fee.Floor != *built.Summary.Fee.Floor {
+		t.Fatal(read.Summary.Fee, err)
+	}
+	signed, err := net.SignDraft(ctx, read, a, nil)
+	if err != nil || !signed.Verified {
+		t.Fatal(signed, err)
+	}
+
+	// A draft that carries a fee table of its own is refused on the connection's chain, to read
+	// or to sign.
+	request := transferTo(a.Address, "1")
+	request.Fee = &FeeChoice{Kind: "exact", Amount: tenfold(t, built.Summary.Fee.Amount)}
+	raised, err := s.BuildOffline(ctx, net.Profile(), net.configuration, request, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err = raised.Serialize(); err != nil {
+		t.Fatal(err)
+	}
+	tampered := raisedFloor(t, data)
+	refused := func(err error) {
+		t.Helper()
+		var e *Error
+		if !errors.As(err, &e) || e.Code != "NetworkMismatch" {
+			t.Fatal(err)
+		}
+		var details struct {
+			Reason string `json:"reason"`
+		}
+		if err = json.Unmarshal(e.Details, &details); err != nil || details.Reason != "configuration" {
+			t.Fatal(string(e.Details), err)
+		}
+	}
+	_, err = net.DeserializeDraft(ctx, tampered)
+	refused(err)
+	_, err = net.SignDraft(ctx, Draft{Serialized: hex.EncodeToString(tampered)}, a, nil)
+	refused(err)
+	if _, err = net.SignDraft(ctx, read, nil, nil); errorCode(err) != "InvalidKey" {
 		t.Fatal(err)
 	}
 }

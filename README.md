@@ -55,7 +55,8 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
   with `SignSignIn`, which signs only once the message passes its checks against the page's
   origin, the account and the time; a refusal is `InvalidSignIn`.
 - `Connect`, `Network.Build`, `Draft.Sign`, `Network.Submit`: node facts, portable drafts,
-  isolated signing and pool outcomes. Transfer, vote, vote withdrawal, burn, second-key
+  isolated signing and pool outcomes. `Network.DeserializeDraft` and `Network.SignDraft` read a
+  serialized draft on the connection's chain. Transfer, vote, vote withdrawal, burn, second-key
   registration, validator registration and resignation use `BuildRequest.Operation`.
 - `Network.Info`, `Refresh`, `LoadChain`: the token and the rules, economics and vote rules in
   force at a height. `Info` is for the node's next block as of `Connect` or the last `Refresh`.
@@ -102,7 +103,13 @@ the signing profile, and the signer must match their sender. `DeserializeDraft` 
 alone, so it computes a fee's floor under the network configuration the draft carries, whose fee
 table the pinned network hash does not cover: a fee the draft calls the floor reads `unverified`,
 never `floor`, and the floor beside it is for display only. Show such a fee as an amount, never
-as the network's minimum. A second key must belong to the same
+as the network's minimum. A connected reader uses `Network.DeserializeDraft` and
+`Network.SignDraft`, which read the draft on the chain the connection loaded, as the Rust,
+WebAssembly and Tauri hosts do: a draft built under another network configuration (another fee
+table, say) is refused with `NetworkMismatch` (`reason`: `configuration`), and a fee at that
+chain's floor reads `floor`. That floor is the one at the draft's height, which the builder chose;
+where a milestone between it and the network's next block changes the fee table, show the fee as
+an amount. A second key must belong to the same
 runtime as the primary key. Do not mutate exported account metadata or a profile during a call.
 
 The runtime has a 512 MiB linear-memory ceiling and a 16 MiB JSON limit. No filesystem or network
