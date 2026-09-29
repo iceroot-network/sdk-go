@@ -42,12 +42,13 @@ func (s *SDK) FromKeystore(ctx context.Context, p Profile, keystore, password []
 
 // ChangeKeystorePassword encrypts a keystore again under newPassword with params, a fresh salt
 // and a fresh nonce, once password opens it. Both password slices are overwritten with zeros on
-// return, and no Go string is made of them.
-func (s *SDK) ChangeKeystorePassword(ctx context.Context, keystore, password, newPassword []byte, params KeystoreParams) ([]byte, error) {
+// return, and no Go string is made of them. maxMemoryKib bounds both the keystore
+// parameters and params; exceeding it returns ParamsOutOfRange.
+func (s *SDK) ChangeKeystorePassword(ctx context.Context, keystore, password, newPassword []byte, params KeystoreParams, maxMemoryKib uint32) ([]byte, error) {
 	defer clear(password)
 	defer clear(newPassword)
 	var out string
-	err := s.call(ctx, "keystoreChangePassword", map[string]any{"keystore": hex.EncodeToString(keystore), "password": secret(password), "newPassword": secret(newPassword), "params": params}, &out)
+	err := s.call(ctx, "keystoreChangePassword", map[string]any{"keystore": hex.EncodeToString(keystore), "password": secret(password), "newPassword": secret(newPassword), "params": params, "maxMemoryKib": maxMemoryKib}, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -56,11 +57,12 @@ func (s *SDK) ChangeKeystorePassword(ctx context.Context, keystore, password, ne
 
 // ReencryptKeystore encrypts a keystore again under the same password with new params, a fresh
 // salt and a fresh nonce, for example to move it to stronger parameters. The password slice is
-// overwritten with zeros on return, and no Go string is made of it.
-func (s *SDK) ReencryptKeystore(ctx context.Context, keystore, password []byte, params KeystoreParams) ([]byte, error) {
+// overwritten with zeros on return, and no Go string is made of it. maxMemoryKib bounds
+// both the keystore parameters and params; exceeding it returns ParamsOutOfRange.
+func (s *SDK) ReencryptKeystore(ctx context.Context, keystore, password []byte, params KeystoreParams, maxMemoryKib uint32) ([]byte, error) {
 	defer clear(password)
 	var out string
-	err := s.call(ctx, "keystoreReencrypt", map[string]any{"keystore": hex.EncodeToString(keystore), "password": secret(password), "params": params}, &out)
+	err := s.call(ctx, "keystoreReencrypt", map[string]any{"keystore": hex.EncodeToString(keystore), "password": secret(password), "params": params, "maxMemoryKib": maxMemoryKib}, &out)
 	if err != nil {
 		return nil, err
 	}

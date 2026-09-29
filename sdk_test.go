@@ -420,14 +420,14 @@ func TestKeystoreBoundary(t *testing.T) {
 	_ = key.Release(ctx)
 	_ = direct.Release(ctx)
 	params := KeystoreParams{MemoryKib: 19456, Iterations: 3, Parallelism: 1}
-	changed, err := s.ChangeKeystorePassword(ctx, stored, []byte("keystore password"), []byte("new password"), params)
+	changed, err := s.ChangeKeystorePassword(ctx, stored, []byte("keystore password"), []byte("new password"), params, 65536)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.FromKeystore(ctx, Devnet(), changed, []byte("keystore password"), AccountOptions{}, 65536); err == nil {
 		t.Fatal("old password opened the changed keystore")
 	}
-	again, err := s.ReencryptKeystore(ctx, changed, []byte("new password"), params)
+	again, err := s.ReencryptKeystore(ctx, changed, []byte("new password"), params, 65536)
 	if err != nil {
 		t.Fatal(err)
 	}
