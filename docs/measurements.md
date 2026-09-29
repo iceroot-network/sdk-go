@@ -5,9 +5,9 @@ clang 16. Source builds use the release flags in `scripts/build-wasm.sh`. These 
 BIP340 measurements; a later post-quantum core must be measured again. The machine also runs
 other work, so timings are observations rather than service guarantees.
 
-The embedded production module is 1,159,655 bytes, or 394,947 bytes with `gzip -n -9`.
+The embedded production module is 1,176,388 bytes, or 400,487 bytes with `gzip -n -9`.
 Its checksum is in `internal/wasm/SHA256SUMS`, and the sdk-rust revision it was built from in
-`internal/wasm/SOURCE`; a build of that revision from a fresh clone, at another path and with an
+`internal/wasm/SOURCE`; a build of that revision from a clean export, at another path and with an
 empty target directory, gave the same bytes. It includes key derivation, transaction handling,
 node response mapping, the vote library and keystores. Fixed signing randomness is unavailable
 in this artifact and is tested as a rejection.
