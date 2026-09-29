@@ -98,7 +98,11 @@ last relay's, and a server error is the core's reading of that answer (`Refused`
 Use `Network.Build` for current nonce, next height, second-key state and minimum fees. The
 lower-level `BuildOffline` takes explicit facts for offline protocols and tests. Applications must
 reserve nonces across pending withdrawals themselves. Serialized drafts are revalidated against
-the signing profile, and the signer must match their sender. A second key must belong to the same
+the signing profile, and the signer must match their sender. `DeserializeDraft` has the profile
+alone, so it computes a fee's floor under the network configuration the draft carries, whose fee
+table the pinned network hash does not cover: a fee the draft calls the floor reads `unverified`,
+never `floor`, and the floor beside it is for display only. Show such a fee as an amount, never
+as the network's minimum. A second key must belong to the same
 runtime as the primary key. Do not mutate exported account metadata or a profile during a call.
 
 The runtime has a 512 MiB linear-memory ceiling and a 16 MiB JSON limit. No filesystem or network

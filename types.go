@@ -87,6 +87,12 @@ type OnlineFacts struct {
 	Height    uint32  `json:"height"`
 	SecondKey *string `json:"secondKey"`
 }
+
+// ResolvedFee is a draft's fee. Source is "floor" when the fee is the floor of a chain the reader
+// loaded itself (a draft built by, or read on, a connection), "explicit" when it was chosen, and
+// "unverified" when it equals the floor of the configuration a serialized draft carries, which a
+// reader without the chain cannot trust: show that fee as an amount, never as the network's
+// minimum. Floor is the floor at the draft's height, or nil where no floor is in force.
 type ResolvedFee struct {
 	Amount Amount  `json:"amount"`
 	Source string  `json:"source"`

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -117,6 +119,15 @@ func TestDrafts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// With the profile alone, a fee at the floor of the configuration the draft carries is
+			// unverified, and the floor is kept for display.
+			want := d.Summary.Fee
+			if want.Source == "floor" {
+				want.Source = "unverified"
+			}
+			if got := roundtrip.Summary.Fee; got.Source != want.Source || got.Amount != want.Amount || fmt.Sprint(amountOrNil(got.Floor)) != fmt.Sprint(amountOrNil(want.Floor)) {
+				t.Fatalf("fee %s %s %v, want %s %s %v", got.Amount, got.Source, amountOrNil(got.Floor), want.Amount, want.Source, amountOrNil(want.Floor))
+			}
 			key, err := other.FromLegacyPassphrase(ctx, p, "probe passphrase")
 			if err != nil {
 				t.Fatal(err)
@@ -141,6 +152,89 @@ func TestDrafts(t *testing.T) {
 		})
 	}
 }
+
+// amountOrNil is the amount a points to, or nil.
+func amountOrNil(a *Amount) any {
+	if a == nil {
+		return nil
+	}
+	return *a
+}
+
+// transferTo is a request to send amount base units to address.
+func transferTo(address string, amount Amount) BuildRequest {
+	return BuildRequest{Operation: Operation{Kind: "transfer", To: []Recipient{{Address: address, Amount: amount}}}}
+}
+
+// raisedFloor is data, a serialized draft whose fee is ten times the floor, rewritten to say that
+// the fee is the floor and to carry a fee table ten times the network's.
+func raisedFloor(t *testing.T, data []byte) []byte {
+	t.Helper()
+	text := string(data)
+	tampered := strings.ReplaceAll(strings.Replace(text, `"source":"explicit"`, `"source":"floor"`, 1), `"minFee":6173`, `"minFee":61730`)
+	if tampered == text || strings.Contains(tampered, `"minFee":6173,`) || !strings.Contains(tampered, `"source":"floor"`) {
+		t.Fatalf("the serialized form changed its layout: %s", text)
+	}
+	return []byte(tampered)
+}
+
+// tenfold is ten times amount.
+func tenfold(t *testing.T, amount Amount) Amount {
+	t.Helper()
+	value, err := strconv.ParseUint(string(amount), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Amount(strconv.FormatUint(value*10, 10))
+}
+
+func TestADraftsOwnFeeTableNeverMakesItsFeeTheFloor(t *testing.T) {
+	ctx := context.Background()
+	s := testSDK(t)
+	cfg := configuration(t)
+	info, err := s.LoadChain(ctx, Devnet(), cfg, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := info.Profile
+	a, err := s.FromLegacyPassphrase(ctx, p, "probe passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Release(ctx)
+	facts := OnlineFacts{Sender: a.PublicKey, Nonce: "1", Height: 2}
+	floor, err := s.BuildOffline(ctx, p, cfg, transferTo(a.Address, "1"), facts)
+	if err != nil || floor.Summary.Fee.Source != "floor" {
+		t.Fatal(floor.Summary.Fee, err)
+	}
+	// A fee ten times the floor, which the form then calls the floor of a fee table of its own.
+	request := transferTo(a.Address, "1")
+	raised := tenfold(t, floor.Summary.Fee.Amount)
+	request.Fee = &FeeChoice{Kind: "exact", Amount: raised}
+	built, err := s.BuildOffline(ctx, p, cfg, request, facts)
+	if err != nil || built.Summary.Fee.Source != "explicit" {
+		t.Fatal(built.Summary.Fee, err)
+	}
+	data, err := built.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.DeserializeDraft(ctx, p, raisedFloor(t, data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fee is the transaction's own; the floor of the form's fee table is kept for display
+	// only, and the fee is never called the floor.
+	fee := read.Summary.Fee
+	if fee.Source != "unverified" || fee.Amount != raised || fee.Floor == nil || *fee.Floor != raised {
+		t.Fatalf("fee %s %s, floor %v", fee.Amount, fee.Source, amountOrNil(fee.Floor))
+	}
+	// Untouched, the raised fee reads as the explicit fee it is.
+	if read, err = s.DeserializeDraft(ctx, p, data); err != nil || read.Summary.Fee.Source != "explicit" {
+		t.Fatal(read.Summary.Fee, err)
+	}
+}
+
 func TestMemoryAndConcurrency(t *testing.T) {
 	s := testSDK(t)
 	ctx := context.Background()
