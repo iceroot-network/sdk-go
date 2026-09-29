@@ -65,10 +65,16 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
 `Connect` tries the configured relays until connected and pins the chain identity. It checks the
 crypto configuration and the node configuration against that identity. A connection then stays
 on its selected relay; explicitly reconnect to change it, passing `Network.Profile()` to retain
-the pin. HTTP uses context deadlines, a 30-second default timeout, bounded responses, conservative
-rate pacing and up to three retries of HTTP 429, honoring `Retry-After`. `ConnectOptions` accepts
-an HTTP transport and request headers. Submission reports preserve per-transaction refusals;
-transport failure after a submission can mean uncertain acceptance, so query its id before retrying.
+the pin. HTTP uses context deadlines, a 30-second default timeout, conservative rate pacing and up
+to three retries of HTTP 429, honoring `Retry-After`. `ConnectOptions` accepts an HTTP transport
+and request headers. Submission reports preserve per-transaction refusals; transport failure after
+a submission can mean uncertain acceptance, so query its id before retrying.
+
+Answers are read as the relay sends them and never decompressed: every request names
+`Accept-Encoding: identity`, which also stops Go's transport, or an application's, from
+decompressing. At most the core's answer limit (8 MiB, from its `transportLimits`) is read. A relay
+that declares or sends a longer answer is unavailable, like one that cannot be reached, and the
+rest of its answer is not read.
 
 Use `Network.Build` for current nonce, next height, second-key state and minimum fees. The
 lower-level `BuildOffline` takes explicit facts for offline protocols and tests. Applications must

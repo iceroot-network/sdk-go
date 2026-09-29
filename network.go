@@ -36,6 +36,13 @@ type nodeResponse struct {
 	Body    string      `json:"body"`
 }
 
+// transportLimits are the bounds of the core's node API client, which the host's transport keeps:
+// the longest answer it reads, and the longest wait after HTTP 429 it accepts.
+type transportLimits struct {
+	MaxResponseBytes int64  `json:"maxResponseBytes"`
+	MaxRetryAfterMs  uint64 `json:"maxRetryAfterMs"`
+}
+
 // Network is a node client pinned to one chain. Use Profile to pass the pinned identity to an
 // offline signer. Nonce reservation across pending withdrawals is the custodian's responsibility.
 type Network struct {
@@ -46,6 +53,7 @@ type Network struct {
 	node          NodeConfiguration
 	relay         string
 	options       ConnectOptions
+	limits        transportLimits
 	mu            sync.Mutex
 	nextRequest   time.Time
 	infoMu        sync.RWMutex
@@ -71,7 +79,9 @@ func (n *Network) Info() ChainInfo {
 	return v
 }
 
-func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Network, error) {
+// newNetwork is a client of p's relays, not yet connected, with the options' defaults and the
+// core's transport limits.
+func (s *SDK) newNetwork(ctx context.Context, p Profile, o ConnectOptions) (*Network, error) {
 	if len(p.API.Relays) == 0 {
 		return nil, &Error{Code: "NodeUnavailable", Message: "profile has no relays"}
 	}
@@ -83,6 +93,17 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 	}
 	o.Headers = o.Headers.Clone()
 	n := &Network{sdk: s, profile: p, options: o}
+	if err := s.call(ctx, "transportLimits", nil, &n.limits); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Network, error) {
+	n, err := s.newNetwork(ctx, p, o)
+	if err != nil {
+		return nil, err
+	}
 	var last error
 	for _, relay := range p.API.Relays {
 		if err := s.call(ctx, "relay", map[string]any{"url": relay}, &n.relay); err != nil {
@@ -186,6 +207,9 @@ func (n *Network) send(ctx context.Context, request nodeRequest) (nodeResponse, 
 		for _, h := range request.Headers {
 			req.Header.Set(h[0], h[1])
 		}
+		// Answers are read as they are sent. Go's transport decompresses an answer when it asked
+		// for compression itself, and naming an encoding stops that for any transport.
+		req.Header.Set("Accept-Encoding", "identity")
 		res, err := n.options.HTTP.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -193,13 +217,9 @@ func (n *Network) send(ctx context.Context, request nodeRequest) (nodeResponse, 
 			}
 			return nodeResponse{}, &Error{Code: "NodeUnavailable", Message: err.Error()}
 		}
-		data, readErr := io.ReadAll(io.LimitReader(res.Body, maxJSON+1))
-		_ = res.Body.Close()
-		if readErr != nil {
-			return nodeResponse{}, readErr
-		}
-		if len(data) > maxJSON {
-			return nodeResponse{}, &Error{Code: "BadResponse", Message: "node response exceeds 16 MiB"}
+		data, err := n.read(ctx, res, request.Method+" "+req.URL.String())
+		if err != nil {
+			return nodeResponse{}, err
 		}
 		response := nodeResponse{Status: uint16(res.StatusCode), Body: string(data), Headers: make([][2]string, 0, len(res.Header))}
 		for k, values := range res.Header {
@@ -225,6 +245,31 @@ func (n *Network) send(ctx context.Context, request nodeRequest) (nodeResponse, 
 		}
 	}
 	return nodeResponse{}, fmt.Errorf("request retry limit")
+}
+
+// read reads the body of res, closing it, up to the core's answer limit. A relay that declares or
+// sends a longer answer is unavailable, as one that cannot be reached: the body is not read past
+// the limit.
+func (n *Network) read(ctx context.Context, res *http.Response, what string) ([]byte, error) {
+	defer res.Body.Close()
+	limit := n.limits.MaxResponseBytes
+	tooLong := func(length string) error {
+		return &Error{Code: "NodeUnavailable", Message: fmt.Sprintf("%s answered with a body of %s bytes; at most %d are read", what, length, limit)}
+	}
+	if res.ContentLength > limit {
+		return nil, tooLong(strconv.FormatInt(res.ContentLength, 10))
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &Error{Code: "NodeUnavailable", Message: err.Error()}
+	}
+	if int64(len(data)) > limit {
+		return nil, tooLong(fmt.Sprintf("%d or more", len(data)))
+	}
+	return data, nil
 }
 func (n *Network) exchange(ctx context.Context, operation string, args any) (nodeResponse, error) {
 	var request nodeRequest

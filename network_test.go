@@ -145,17 +145,21 @@ func TestOversizedResponseAndRateLimitCancellation(t *testing.T) {
 	s := testSDK(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/large" {
-			_, _ = w.Write([]byte(strings.Repeat("x", maxJSON+1)))
+			_, _ = w.Write([]byte(strings.Repeat("x", answerLimit+1)))
 			return
 		}
 		w.Header().Set("Retry-After", "20")
 		w.WriteHeader(429)
 	}))
 	defer server.Close()
-	n := &Network{sdk: s, relay: server.URL, options: ConnectOptions{HTTP: server.Client()}}
-	_, err := n.send(context.Background(), nodeRequest{Method: "GET", Target: "/large"})
+	n, err := s.newNetwork(context.Background(), Devnet(server.URL), ConnectOptions{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.relay = server.URL
+	_, err = n.send(context.Background(), nodeRequest{Method: "GET", Target: "/large"})
 	var e *Error
-	if !errors.As(err, &e) || e.Code != "BadResponse" {
+	if !errors.As(err, &e) || e.Code != "NodeUnavailable" {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
