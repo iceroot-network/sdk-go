@@ -22,6 +22,11 @@ import (
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
+
+// ConnectOptions configure a connection. HTTP defaults to a client with a 30-second timeout that
+// follows no redirect. Headers are sent with every request, except Accept-Encoding, which is always
+// identity so that answers are read as sent. PollInterval spaces the reads of WaitConfirmed and
+// WaitFinal (default 2 seconds).
 type ConnectOptions struct {
 	HTTP         HTTPDoer
 	Headers      http.Header
@@ -126,6 +131,9 @@ func (s *SDK) newNetwork(ctx context.Context, p Profile, o ConnectOptions) (*Net
 	return n, nil
 }
 
+// Connect tries p's relays in order until one answers, checks the chain it serves against p, and
+// pins that chain. The connection sends each request to that relay first, and to the profile's
+// other relays of the same chain when it is unavailable for the request.
 func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Network, error) {
 	n, err := s.newNetwork(ctx, p, o)
 	if err != nil {
