@@ -45,7 +45,10 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
   existing classical identities only. Release each `Account` when finished.
 - `EncryptKeystore`, `FromKeystore`, `ChangeKeystorePassword`, `ReencryptKeystore`,
   `InspectKeystore`, `ArmorKeystore`, `DearmorKeystore`: the shared encrypted recovery format. `FromKeystore` derives internally without returning
-  the phrase.
+  the phrase. `FromKeystore`, `ChangeKeystorePassword` and `ReencryptKeystore` take a final
+  `maxMemoryKib uint32` argument to bound key-derivation memory for untrusted keystores.
+  Password changes and re-encryption apply this ceiling to both the stored and replacement
+  parameters, returning `ParamsOutOfRange` if either exceeds it.
 - `ParseAmount`, `FormatAmount`, `ValidateAddress`, `AddressFromPublicKey`: core validation.
   `Amount` is a decimal integer string in base units; neither amounts nor nonces use floats.
 - `SignMessage`, `VerifyMessage`, `BuildSignIn`, `ParseSignIn`, `Account.SignSignIn`: shared
