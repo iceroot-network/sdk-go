@@ -33,6 +33,15 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
+// errorCode is the SDK code of err, or empty when err is not an SDK error.
+func errorCode(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	return ""
+}
+
 // SDK owns an isolated runtime and its secret keys. Calls are safe from multiple goroutines,
 // serialized within one instance. Use independent instances for parallel signing.
 type SDK struct {

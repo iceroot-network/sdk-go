@@ -156,7 +156,6 @@ func TestOversizedResponseAndRateLimitCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n.relay = server.URL
 	_, err = n.send(context.Background(), nodeRequest{Method: "GET", Target: "/large"})
 	var e *Error
 	if !errors.As(err, &e) || e.Code != "NodeUnavailable" {

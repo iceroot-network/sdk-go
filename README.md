@@ -63,18 +63,26 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
   `Network.Info().VoteRules` supplies the network's rules for the next block.
 
 `Connect` tries the configured relays until connected and pins the chain identity. It checks the
-crypto configuration and the node configuration against that identity. A connection then stays
-on its selected relay; explicitly reconnect to change it, passing `Network.Profile()` to retain
-the pin. HTTP uses context deadlines, a 30-second default timeout, conservative rate pacing and up
-to three retries of HTTP 429, honoring `Retry-After`. `ConnectOptions` accepts an HTTP transport
+crypto configuration and the node configuration against that identity. A connection then sends
+each request to its selected relay first. When that relay is unavailable for a request, the
+request goes to the profile's other relays in order, each used only once its node configuration
+names the pinned chain; a relay of another chain is never asked again. Reconnect to select another
+relay first, passing `Network.Profile()` to retain the pin. HTTP uses context deadlines, a
+30-second default timeout and conservative rate pacing. `ConnectOptions` accepts an HTTP transport
 and request headers. Submission reports preserve per-transaction refusals; transport failure after
 a submission can mean uncertain acceptance, so query its id before retrying.
 
-Answers are read as the relay sends them and never decompressed: every request names
-`Accept-Encoding: identity`, which also stops Go's transport, or an application's, from
-decompressing. At most the core's answer limit (8 MiB, from its `transportLimits`) is read. A relay
-that declares or sends a longer answer is unavailable, like one that cannot be reached, and the
-rest of its answer is not read.
+The transport keeps the core's bounds (`transportLimits`), as its Rust and TypeScript clients do.
+A relay is unavailable for a request when it cannot be reached, when it declares or sends an
+answer longer than 8 MiB, or when it stays rate limited:
+
+- Answers are read as the relay sends them and never decompressed: every request names
+  `Accept-Encoding: identity`, which also stops Go's transport, or an application's, from
+  decompressing. At most 8 MiB is read; the rest of a longer answer is not.
+- After HTTP 429 the wait is the core's `backoffDelay`: 2 seconds, doubling, for three retries, or
+  the node's `Retry-After` in whole seconds when that is longer. A relay that asks for more than
+  a minute, or whose retries are spent, is not waited for. When no other relay answers, the error
+  is `RateLimited`, with the node's `retryAfterSeconds` in its details.
 
 Use `Network.Build` for current nonce, next height, second-key state and minimum fees. The
 lower-level `BuildOffline` takes explicit facts for offline protocols and tests. Applications must

@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,13 @@ type transportLimits struct {
 	MaxRetryAfterMs  uint64 `json:"maxRetryAfterMs"`
 }
 
+// What a connection knows of a relay's chain.
+const (
+	relayUnchecked = iota
+	relaySameChain
+	relayOtherChain
+)
+
 // Network is a node client pinned to one chain. Use Profile to pass the pinned identity to an
 // offline signer. Nonce reservation across pending withdrawals is the custodian's responsibility.
 type Network struct {
@@ -51,12 +59,21 @@ type Network struct {
 	configuration json.RawMessage
 	info          ChainInfo
 	node          NodeConfiguration
-	relay         string
-	options       ConnectOptions
-	limits        transportLimits
-	mu            sync.Mutex
-	nextRequest   time.Time
-	infoMu        sync.RWMutex
+	// relays are the profile's relays as the core writes them, in order; relays[current] is the
+	// one the connection was made through.
+	relays      []string
+	current     int
+	connected   bool
+	checkMu     sync.Mutex
+	checked     []int
+	refused     []error
+	options     ConnectOptions
+	limits      transportLimits
+	pause       func(context.Context, time.Duration) error
+	spacing     time.Duration
+	mu          sync.Mutex
+	nextRequest time.Time
+	infoMu      sync.RWMutex
 }
 
 func (n *Network) Profile() Profile {
@@ -92,10 +109,18 @@ func (s *SDK) newNetwork(ctx context.Context, p Profile, o ConnectOptions) (*Net
 		o.PollInterval = 2 * time.Second
 	}
 	o.Headers = o.Headers.Clone()
-	n := &Network{sdk: s, profile: p, options: o}
+	n := &Network{sdk: s, profile: p, options: o, pause: wait, spacing: 610 * time.Millisecond}
 	if err := s.call(ctx, "transportLimits", nil, &n.limits); err != nil {
 		return nil, err
 	}
+	n.relays = make([]string, len(p.API.Relays))
+	for i, relay := range p.API.Relays {
+		if err := s.call(ctx, "relay", map[string]any{"url": relay}, &n.relays[i]); err != nil {
+			return nil, err
+		}
+	}
+	n.checked = make([]int, len(n.relays))
+	n.refused = make([]error, len(n.relays))
 	return n, nil
 }
 
@@ -105,10 +130,8 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 		return nil, err
 	}
 	var last error
-	for _, relay := range p.API.Relays {
-		if err := s.call(ctx, "relay", map[string]any{"url": relay}, &n.relay); err != nil {
-			return nil, err
-		}
+	for i := range n.relays {
+		n.current = i
 		crypto, err := n.exchange(ctx, "cryptoConfiguration", map[string]any{})
 		if err != nil {
 			last = err
@@ -139,6 +162,8 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 			last = err
 			continue
 		}
+		n.checked[i] = relaySameChain
+		n.connected = true
 		return n, nil
 	}
 	return nil, last
@@ -183,68 +208,173 @@ func (n *Network) throttle(ctx context.Context) error {
 	if at.Before(now) {
 		at = now
 	}
-	n.nextRequest = at.Add(610 * time.Millisecond)
+	n.nextRequest = at.Add(n.spacing)
 	n.mu.Unlock()
 	return wait(ctx, time.Until(at))
 }
+
+// send sends request through the connection's relay. When that relay is unavailable for it (it
+// cannot be reached, its answer is longer than the core's limit, or it stays rate limited), the
+// profile's other relays are tried in order, each once its node configuration names the
+// connection's chain. A relay of another chain is never asked again. The error is the last
+// relay's. While connecting, only the relay being connected to is asked.
 func (n *Network) send(ctx context.Context, request nodeRequest) (nodeResponse, error) {
-	for attempt := 0; attempt < 4; attempt++ {
-		if err := n.throttle(ctx); err != nil {
-			return nodeResponse{}, err
-		}
-		var body io.Reader
-		if request.Body != nil {
-			body = strings.NewReader(*request.Body)
-		}
-		req, err := http.NewRequestWithContext(ctx, request.Method, n.relay+request.Target, body)
-		if err != nil {
-			return nodeResponse{}, err
-		}
-		req.Header = n.options.Headers.Clone()
-		if req.Header == nil {
-			req.Header = make(http.Header)
-		}
-		for _, h := range request.Headers {
-			req.Header.Set(h[0], h[1])
-		}
-		// Answers are read as they are sent. Go's transport decompresses an answer when it asked
-		// for compression itself, and naming an encoding stops that for any transport.
-		req.Header.Set("Accept-Encoding", "identity")
-		res, err := n.options.HTTP.Do(req)
-		if err != nil {
+	if !n.connected {
+		return n.attempt(ctx, n.relays[n.current], request)
+	}
+	var last error
+	for _, i := range n.order() {
+		if err := n.identify(ctx, i); err != nil {
 			if ctx.Err() != nil {
 				return nodeResponse{}, ctx.Err()
 			}
-			return nodeResponse{}, &Error{Code: "NodeUnavailable", Message: err.Error()}
+			last = err
+			continue
 		}
-		data, err := n.read(ctx, res, request.Method+" "+req.URL.String())
-		if err != nil {
+		response, err := n.attempt(ctx, n.relays[i], request)
+		if code := errorCode(err); err == nil || (code != "NodeUnavailable" && code != "RateLimited") {
+			return response, err
+		}
+		last = err
+	}
+	return nodeResponse{}, last
+}
+
+// order is the connection's relay, then the profile's other relays, each once.
+func (n *Network) order() []int {
+	order := []int{n.current}
+	for i, relay := range n.relays {
+		if !slices.ContainsFunc(order, func(j int) bool { return n.relays[j] == relay }) {
+			order = append(order, i)
+		}
+	}
+	return order
+}
+
+// identify checks, once, that relays[i] serves the connection's chain, by its node configuration.
+// A relay of another chain is refused with NetworkMismatch from then on; one that cannot be checked
+// now is checked again next time.
+func (n *Network) identify(ctx context.Context, i int) error {
+	n.checkMu.Lock()
+	state, refused := n.checked[i], n.refused[i]
+	n.checkMu.Unlock()
+	switch state {
+	case relaySameChain:
+		return nil
+	case relayOtherChain:
+		return refused
+	}
+	request, err := n.prepare(ctx, "nodeConfiguration", map[string]any{})
+	if err != nil {
+		return err
+	}
+	response, err := n.attempt(ctx, n.relays[i], request)
+	if err != nil {
+		return err
+	}
+	args := map[string]any{"profile": n.profile, "configuration": n.configuration, "status": response.Status, "headers": response.Headers, "body": response.Body}
+	err = n.sdk.call(ctx, "chainCheck", args, nil)
+	n.checkMu.Lock()
+	defer n.checkMu.Unlock()
+	switch {
+	case err == nil:
+		n.checked[i] = relaySameChain
+	case errorCode(err) == "NetworkMismatch":
+		n.checked[i], n.refused[i] = relayOtherChain, err
+	}
+	return err
+}
+
+// attempt sends request to relay alone. After HTTP 429 it waits as the core's backoffDelay says,
+// or returns RateLimited when the core says not to wait: the relay's retries are spent, or it asked
+// for longer than the core's longest wait.
+func (n *Network) attempt(ctx context.Context, relay string, request nodeRequest) (nodeResponse, error) {
+	for attempt := uint32(0); ; attempt++ {
+		if err := n.throttle(ctx); err != nil {
 			return nodeResponse{}, err
 		}
-		response := nodeResponse{Status: uint16(res.StatusCode), Body: string(data), Headers: make([][2]string, 0, len(res.Header))}
-		for k, values := range res.Header {
-			for _, v := range values {
-				response.Headers = append(response.Headers, [2]string{k, v})
-			}
+		response, err := n.fetch(ctx, relay, request)
+		if err != nil || response.Status != http.StatusTooManyRequests {
+			return response, err
 		}
-		if res.StatusCode != 429 || attempt == 3 {
-			return response, nil
-		}
-		delay := time.Duration(2<<attempt) * time.Second
-		if seconds, err := strconv.ParseUint(res.Header.Get("Retry-After"), 10, 32); err == nil {
-			if d := time.Duration(seconds) * time.Second; d > delay {
-				delay = d
+		seconds := retryAfterSeconds(response.Headers)
+		args := map[string]any{"attempt": attempt, "retryAfterMs": nil}
+		if seconds != nil {
+			ms := uint64(math.MaxUint64)
+			if *seconds <= math.MaxUint64/1000 {
+				ms = *seconds * 1000
 			}
-		} else if at, err := http.ParseTime(res.Header.Get("Retry-After")); err == nil {
-			if d := time.Until(at); d > delay {
-				delay = d
-			}
+			args["retryAfterMs"] = ms
 		}
-		if err = wait(ctx, delay); err != nil {
+		var delay *uint64
+		if err = n.sdk.call(ctx, "backoffDelay", args, &delay); err != nil {
+			return nodeResponse{}, err
+		}
+		if delay == nil || *delay > n.limits.MaxRetryAfterMs {
+			details, _ := json.Marshal(map[string]any{"retryAfterSeconds": seconds})
+			return nodeResponse{}, &Error{Code: "RateLimited", Message: "rate limited by the node", Details: details}
+		}
+		if err = n.pause(ctx, time.Duration(*delay)*time.Millisecond); err != nil {
 			return nodeResponse{}, err
 		}
 	}
-	return nodeResponse{}, fmt.Errorf("request retry limit")
+}
+
+// retryAfterSeconds reads the first Retry-After as the core does: whole seconds, or nothing.
+func retryAfterSeconds(headers [][2]string) *uint64 {
+	for _, h := range headers {
+		if !strings.EqualFold(h[0], "Retry-After") {
+			continue
+		}
+		// Rust's integers take one leading plus sign; strconv takes none.
+		seconds, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimSpace(h[1]), "+"), 10, 64)
+		if err != nil {
+			return nil
+		}
+		return &seconds
+	}
+	return nil
+}
+
+// fetch makes one HTTP exchange with relay.
+func (n *Network) fetch(ctx context.Context, relay string, request nodeRequest) (nodeResponse, error) {
+	var body io.Reader
+	if request.Body != nil {
+		body = strings.NewReader(*request.Body)
+	}
+	url := relay + request.Target
+	req, err := http.NewRequestWithContext(ctx, request.Method, url, body)
+	if err != nil {
+		return nodeResponse{}, err
+	}
+	req.Header = n.options.Headers.Clone()
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	for _, h := range request.Headers {
+		req.Header.Set(h[0], h[1])
+	}
+	// Answers are read as they are sent. Go's transport decompresses an answer when it asked
+	// for compression itself, and naming an encoding stops that for any transport.
+	req.Header.Set("Accept-Encoding", "identity")
+	res, err := n.options.HTTP.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nodeResponse{}, ctx.Err()
+		}
+		return nodeResponse{}, &Error{Code: "NodeUnavailable", Message: err.Error()}
+	}
+	data, err := n.read(ctx, res, request.Method+" "+url)
+	if err != nil {
+		return nodeResponse{}, err
+	}
+	response := nodeResponse{Status: uint16(res.StatusCode), Body: string(data), Headers: make([][2]string, 0, len(res.Header))}
+	for k, values := range res.Header {
+		for _, v := range values {
+			response.Headers = append(response.Headers, [2]string{k, v})
+		}
+	}
+	return response, nil
 }
 
 // read reads the body of res, closing it, up to the core's answer limit. A relay that declares or
@@ -271,9 +401,16 @@ func (n *Network) read(ctx context.Context, res *http.Response, what string) ([]
 	}
 	return data, nil
 }
-func (n *Network) exchange(ctx context.Context, operation string, args any) (nodeResponse, error) {
+
+// prepare has the core write the request of a node API operation.
+func (n *Network) prepare(ctx context.Context, operation string, args any) (nodeRequest, error) {
 	var request nodeRequest
-	if err := n.sdk.call(ctx, "apiPrepare", map[string]any{"seats": n.node.Seats, "operation": operation, "args": args}, &request); err != nil {
+	err := n.sdk.call(ctx, "apiPrepare", map[string]any{"seats": n.node.Seats, "operation": operation, "args": args}, &request)
+	return request, err
+}
+func (n *Network) exchange(ctx context.Context, operation string, args any) (nodeResponse, error) {
+	request, err := n.prepare(ctx, operation, args)
+	if err != nil {
 		return nodeResponse{}, err
 	}
 	return n.send(ctx, request)

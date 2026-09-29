@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,14 +77,6 @@ func (r *testRelay) asked(path string) int {
 func paddedStatus(size int) []byte {
 	head := `{"data":{"synced":true,"now":80,"blocksCount":0,"timestamp":634},"pad":"`
 	return []byte(head + strings.Repeat("x", size-len(head)-2) + `"}`)
-}
-
-func errorCode(err error) string {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Code
-	}
-	return ""
 }
 
 func TestAnswerLimit(t *testing.T) {
@@ -191,4 +184,229 @@ func TestAnswersAreReadAsSent(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// rateLimitedRelay is a relay of the fixtures that, while after is not empty, answers a node
+// status request with HTTP 429 and that Retry-After ("none" sends no Retry-After).
+func rateLimitedRelay(t *testing.T, after *atomic.Value) *testRelay {
+	after.Store("")
+	return newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		value := after.Load().(string)
+		if value == "" || r.URL.Path != "/api/node/status" {
+			return false
+		}
+		if value != "none" {
+			w.Header().Set("Retry-After", value)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	})
+}
+
+func TestRetryAfterLongerThanAMinuteMovesToTheNextRelay(t *testing.T) {
+	s := testSDK(t)
+	var after atomic.Value
+	first := rateLimitedRelay(t, &after)
+	second := newTestRelay(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	net, err := s.Connect(ctx, Devnet(first.URL+"/api", second.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.paths) != 0 {
+		t.Fatal("the second relay was asked while connecting", second.paths)
+	}
+	for _, value := range []string{"61", " 4000000000 ", "+61", "18446744073709551615"} {
+		after.Store(value)
+		started := time.Now()
+		status, err := net.Status(ctx)
+		if err != nil || status.Height != "80" {
+			t.Fatalf("Retry-After %q: %v %v", value, status, err)
+		}
+		if elapsed := time.Since(started); elapsed > 10*time.Second {
+			t.Fatalf("Retry-After %q: took %s", value, elapsed)
+		}
+	}
+	// The second relay's chain was checked once, before its first answer was used.
+	if second.paths[0] != "/api/node/configuration" || second.asked("/api/node/configuration") != 1 || second.asked("/api/node/status") != 4 {
+		t.Fatal(second.paths)
+	}
+}
+
+func TestRateLimitedByTheLastRelay(t *testing.T) {
+	s := testSDK(t)
+	var after atomic.Value
+	relay := rateLimitedRelay(t, &after)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	net, err := s.Connect(ctx, Devnet(relay.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after.Store("4000000000")
+	_, err = net.Status(ctx)
+	var got *Error
+	if !errors.As(err, &got) {
+		t.Fatal(err)
+	}
+	// The error is the one the core gives for that answer.
+	want := s.call(ctx, "apiDecode", map[string]any{"seats": 53, "operation": "nodeStatus", "args": map[string]any{},
+		"status": 429, "headers": [][2]string{{"Retry-After", "4000000000"}}, "body": "{}"}, nil)
+	var e *Error
+	if !errors.As(want, &e) || e.Code != "RateLimited" || got.Code != e.Code || got.Message != e.Message || string(got.Details) != string(e.Details) {
+		t.Fatalf("got %v %s, want %v", got, got.Details, want)
+	}
+}
+
+func TestWaitsAfterHTTP429AreTheCoreBackoff(t *testing.T) {
+	s := testSDK(t)
+	var limited atomic.Int32
+	var after atomic.Value
+	after.Store("")
+	first := newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/api/node/status" || limited.Load() == 0 {
+			return false
+		}
+		limited.Add(-1)
+		if value := after.Load().(string); value != "" {
+			w.Header().Set("Retry-After", value)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	})
+	second := newTestRelay(t, nil)
+	ctx := context.Background()
+	net, err := s.Connect(ctx, Devnet(first.URL+"/api", second.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	net.spacing = 0
+	var waits []time.Duration
+	net.pause = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return ctx.Err()
+	}
+	for _, c := range []struct {
+		after   string
+		limited int32
+		waits   []time.Duration
+		second  bool
+	}{
+		// The node's longer wait, then an answer from the same relay.
+		{"9", 1, []time.Duration{9 * time.Second}, false},
+		// 2 s doubling, three retries, then the next relay.
+		{"", 100, []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}, true},
+		{"0", 100, []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}, true},
+		// A wait the core reads no number from is no wait asked for.
+		{"Wed, 21 Oct 2037 07:28:00 GMT", 100, []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}, true},
+		{"60", 100, []time.Duration{time.Minute, time.Minute, time.Minute}, true},
+		{"61", 100, nil, true},
+	} {
+		waits = nil
+		after.Store(c.after)
+		limited.Store(c.limited)
+		asked := second.asked("/api/node/status")
+		status, err := net.Status(ctx)
+		if err != nil || status.Height != "80" {
+			t.Fatal(c.after, err)
+		}
+		if fmt.Sprint(waits) != fmt.Sprint(c.waits) || (second.asked("/api/node/status") > asked) != c.second {
+			t.Fatalf("Retry-After %q: waits %v, second relay asked %v", c.after, waits, second.asked("/api/node/status") > asked)
+		}
+		limited.Store(0)
+	}
+}
+
+func TestARelayOfAnotherChainIsNeverAsked(t *testing.T) {
+	s := testSDK(t)
+	configuration, err := os.ReadFile("testdata/node/node-configuration.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after atomic.Value
+	first := rateLimitedRelay(t, &after)
+	other := newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/api/node/configuration" {
+			return false
+		}
+		_, _ = w.Write(bytes.Replace(configuration, []byte("c9b03ab996ef3ac216a2ac53eaee71118cbf7995fa44449a7fb7f94bbe18bcca"), []byte(strings.Repeat("ab", 32)), 1))
+		return true
+	})
+	third := newTestRelay(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	net, err := s.Connect(ctx, Devnet(first.URL+"/api", other.URL+"/api", third.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after.Store("4000000000")
+	for range 2 {
+		if _, err = net.Status(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if other.asked("/api/node/configuration") != 1 || other.asked("/api/node/status") != 0 {
+		t.Fatal("the relay of another chain was used", other.paths)
+	}
+	if third.asked("/api/node/configuration") != 1 || third.asked("/api/node/status") != 2 {
+		t.Fatal(third.paths)
+	}
+	// When no relay of the chain answers, the error is the last relay's.
+	third.Close()
+	if _, err = net.Status(ctx); errorCode(err) != "NodeUnavailable" {
+		t.Fatal(err)
+	}
+}
+
+func TestAnUnavailableRelayIsSkipped(t *testing.T) {
+	s := testSDK(t)
+	var oversized atomic.Bool
+	first := newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/api/node/status" || !oversized.Load() {
+			return false
+		}
+		_, _ = w.Write(paddedStatus(answerLimit + 1))
+		return true
+	})
+	second := newTestRelay(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	net, err := s.Connect(ctx, Devnet(first.URL+"/api", second.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A relay that sends more than the limit, then one that cannot be reached.
+	oversized.Store(true)
+	if status, err := net.Status(ctx); err != nil || status.Height != "80" {
+		t.Fatal(status, err)
+	}
+	first.Close()
+	if status, err := net.Status(ctx); err != nil || status.Height != "80" {
+		t.Fatal(status, err)
+	}
+	if second.asked("/api/node/status") != 2 {
+		t.Fatal(second.paths)
+	}
+}
+
+func TestConnectSkipsARelayThatStaysRateLimited(t *testing.T) {
+	s := testSDK(t)
+	first := newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		w.Header().Set("Retry-After", "4000000000")
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	})
+	second := newTestRelay(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	net, err := s.Connect(ctx, Devnet(first.URL+"/api", second.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The connection's relay is asked first.
+	before := len(first.paths)
+	if _, err = net.Status(ctx); err != nil || len(first.paths) != before {
+		t.Fatal(err, first.paths)
+	}
 }
