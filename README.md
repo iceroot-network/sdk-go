@@ -46,9 +46,14 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
 - `EncryptKeystore`, `FromKeystore`, `ChangeKeystorePassword`, `ReencryptKeystore`,
   `InspectKeystore`, `ArmorKeystore`, `DearmorKeystore`: the shared encrypted recovery format. `FromKeystore` derives internally without returning
   the phrase. `FromKeystore`, `ChangeKeystorePassword` and `ReencryptKeystore` take a final
-  `maxMemoryKib uint32` argument to bound key-derivation memory for untrusted keystores.
-  Password changes and re-encryption apply this ceiling to both the stored and replacement
-  parameters, returning `ParamsOutOfRange` if either exceeds it.
+  `maxMemoryKib uint32`: the most key-derivation memory, in KiB, a keystore from an untrusted
+  source may ask for. A password change or re-encryption applies it to the stored keystore's
+  parameters and to the new ones, and either one asking for more is refused with
+  `ParamsOutOfRange` before any key derivation. The core keeps the ceiling in the format's
+  range: under 19,456 KiB it counts as 19,456, so 0 is the tightest ceiling rather than none,
+  and over 524,288 KiB it counts as 524,288, the format's own ceiling and the TypeScript SDK's
+  default. `ChangeKeystorePassword` and `ReencryptKeystore` gained this argument before the
+  first module release; code built against an earlier revision adds it.
 - `ParseAmount`, `FormatAmount`, `ValidateAddress`, `AddressFromPublicKey`: core validation.
   `Amount` is a decimal integer string in base units; neither amounts nor nonces use floats.
 - `SignMessage`, `VerifyMessage`, `BuildSignIn`, `ParseSignIn`, `Account.SignSignIn`: shared

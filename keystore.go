@@ -33,8 +33,13 @@ func (s *SDK) EncryptKeystore(ctx context.Context, phrase, password []byte, para
 }
 
 // FromKeystore opens a keystore and derives the account inside the core; the recovery phrase
-// never reaches Go. maxMemoryKib bounds the work a keystore from an untrusted source can ask
-// for. The password slice is overwritten with zeros on return, and no Go string is made of it.
+// never reaches Go. maxMemoryKib is the most Argon2id memory, in KiB, a keystore from an
+// untrusted source may ask for: one that asks for more is refused with ParamsOutOfRange before
+// any key derivation. The core keeps the ceiling in the format's range, so a value under its
+// 19,456 KiB floor counts as the floor (0 is the tightest ceiling, not none) and a value over
+// 524,288 KiB counts as the format's own ceiling, which the TypeScript SDK applies when no
+// ceiling is given. The password slice is overwritten with zeros on return, and no Go string is
+// made of it.
 func (s *SDK) FromKeystore(ctx context.Context, p Profile, keystore, password []byte, o AccountOptions, maxMemoryKib uint32) (*Account, error) {
 	defer clear(password)
 	return s.account(ctx, "keyKeystore", map[string]any{"profile": p, "keystore": hex.EncodeToString(keystore), "password": secret(password), "account": o.Account, "index": o.Index, "passphrase": o.Passphrase, "maxMemoryKib": maxMemoryKib})
@@ -42,8 +47,9 @@ func (s *SDK) FromKeystore(ctx context.Context, p Profile, keystore, password []
 
 // ChangeKeystorePassword encrypts a keystore again under newPassword with params, a fresh salt
 // and a fresh nonce, once password opens it. Both password slices are overwritten with zeros on
-// return, and no Go string is made of them. maxMemoryKib bounds both the keystore
-// parameters and params; exceeding it returns ParamsOutOfRange.
+// return, and no Go string is made of them. maxMemoryKib bounds, as for FromKeystore, both the
+// parameters the keystore was written with and params: either one asking for more is refused
+// with ParamsOutOfRange before any key derivation.
 func (s *SDK) ChangeKeystorePassword(ctx context.Context, keystore, password, newPassword []byte, params KeystoreParams, maxMemoryKib uint32) ([]byte, error) {
 	defer clear(password)
 	defer clear(newPassword)
@@ -57,8 +63,8 @@ func (s *SDK) ChangeKeystorePassword(ctx context.Context, keystore, password, ne
 
 // ReencryptKeystore encrypts a keystore again under the same password with new params, a fresh
 // salt and a fresh nonce, for example to move it to stronger parameters. The password slice is
-// overwritten with zeros on return, and no Go string is made of it. maxMemoryKib bounds
-// both the keystore parameters and params; exceeding it returns ParamsOutOfRange.
+// overwritten with zeros on return, and no Go string is made of it. maxMemoryKib bounds both
+// the keystore's parameters and params, as for ChangeKeystorePassword.
 func (s *SDK) ReencryptKeystore(ctx context.Context, keystore, password []byte, params KeystoreParams, maxMemoryKib uint32) ([]byte, error) {
 	defer clear(password)
 	var out string
