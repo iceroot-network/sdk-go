@@ -64,12 +64,17 @@ func newTestRelay(t *testing.T, answer func(w http.ResponseWriter, r *http.Reque
 	return relay
 }
 
-// asked returns how many times the relay was asked for path.
-func (r *testRelay) asked(path string) int {
+// requests returns the paths the relay was asked for, in order.
+func (r *testRelay) requests() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return append([]string(nil), r.paths...)
+}
+
+// asked returns how many times the relay was asked for path.
+func (r *testRelay) asked(path string) int {
 	n := 0
-	for _, p := range r.paths {
+	for _, p := range r.requests() {
 		if p == path {
 			n++
 		}
@@ -218,8 +223,8 @@ func TestRetryAfterLongerThanAMinuteMovesToTheNextRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.paths) != 0 {
-		t.Fatal("the second relay was asked while connecting", second.paths)
+	if asked := second.requests(); len(asked) != 0 {
+		t.Fatal("the second relay was asked while connecting", asked)
 	}
 	for _, value := range []string{"61", " 4000000000 ", "+61", "18446744073709551615"} {
 		after.Store(value)
@@ -233,8 +238,8 @@ func TestRetryAfterLongerThanAMinuteMovesToTheNextRelay(t *testing.T) {
 		}
 	}
 	// The second relay's chain was checked once, before its first answer was used.
-	if second.paths[0] != "/api/node/configuration" || second.asked("/api/node/configuration") != 1 || second.asked("/api/node/status") != 4 {
-		t.Fatal(second.paths)
+	if asked := second.requests(); asked[0] != "/api/node/configuration" || second.asked("/api/node/configuration") != 1 || second.asked("/api/node/status") != 4 {
+		t.Fatal(asked)
 	}
 }
 
@@ -351,10 +356,10 @@ func TestARelayOfAnotherChainIsNeverAsked(t *testing.T) {
 		}
 	}
 	if other.asked("/api/node/configuration") != 1 || other.asked("/api/node/status") != 0 {
-		t.Fatal("the relay of another chain was used", other.paths)
+		t.Fatal("the relay of another chain was used", other.requests())
 	}
 	if third.asked("/api/node/configuration") != 1 || third.asked("/api/node/status") != 2 {
-		t.Fatal(third.paths)
+		t.Fatal(third.requests())
 	}
 	// When no relay of the chain answers, the error is the last relay's.
 	third.Close()
@@ -390,7 +395,7 @@ func TestAnUnavailableRelayIsSkipped(t *testing.T) {
 		t.Fatal(status, err)
 	}
 	if second.asked("/api/node/status") != 2 {
-		t.Fatal(second.paths)
+		t.Fatal(second.requests())
 	}
 }
 
@@ -409,9 +414,9 @@ func TestConnectSkipsARelayThatStaysRateLimited(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The connection's relay is asked first.
-	before := len(first.paths)
-	if _, err = net.Status(ctx); err != nil || len(first.paths) != before {
-		t.Fatal(err, first.paths)
+	before := len(first.requests())
+	if _, err = net.Status(ctx); err != nil || len(first.requests()) != before {
+		t.Fatal(err, first.requests())
 	}
 }
 
