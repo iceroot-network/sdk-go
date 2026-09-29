@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -81,6 +82,8 @@ type Network struct {
 	mu          sync.Mutex
 	nextRequest time.Time
 	infoMu      sync.RWMutex
+	// height is the node's height as of the last status the connection read.
+	height atomic.Uint64
 }
 
 func (n *Network) Profile() Profile {
@@ -189,17 +192,12 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 
 // Refresh reads the node's status and moves Info to the rules in force at the node's next block.
 func (n *Network) Refresh(ctx context.Context) (NodeStatus, error) {
-	status, err := n.Status(ctx)
+	status, height, err := n.status(ctx)
 	if err != nil {
 		return status, err
 	}
-	height, err := strconv.ParseUint(status.Height, 10, 64)
-	if err != nil {
-		return status, &Error{Code: "BadResponse", Message: "node height is not a number"}
-	}
-	next := min(height+1, math.MaxUint32)
 	var info ChainInfo
-	if err = n.sdk.call(ctx, "chainInfo", map[string]any{"profile": n.profile, "configuration": n.configuration, "height": next}, &info); err != nil {
+	if err = n.sdk.call(ctx, "chainInfo", map[string]any{"profile": n.profile, "configuration": n.configuration, "height": after(height)}, &info); err != nil {
 		return status, err
 	}
 	n.infoMu.Lock()
@@ -517,10 +515,41 @@ func (n *Network) Account(ctx context.Context, address string) (AccountInfo, err
 	err := n.Read(ctx, "account", map[string]any{"address": address}, &a)
 	return a, err
 }
+
+// Status reads the node's status. The connection keeps its height, even when it is lower than the
+// last one read, since the status is the node's own word: DeserializeDraft and SignDraft judge a
+// draft's floor at the block after it.
 func (n *Network) Status(ctx context.Context) (NodeStatus, error) {
+	status, _, err := n.status(ctx)
+	return status, err
+}
+
+// status reads the node's status and keeps its height, which it also returns.
+func (n *Network) status(ctx context.Context) (NodeStatus, uint64, error) {
 	var s NodeStatus
-	err := n.Read(ctx, "nodeStatus", nil, &s)
-	return s, err
+	if err := n.Read(ctx, "nodeStatus", nil, &s); err != nil {
+		return s, 0, err
+	}
+	height, err := strconv.ParseUint(s.Height, 10, 64)
+	if err != nil {
+		return s, 0, &Error{Code: "BadResponse", Message: "node height is not a number"}
+	}
+	n.height.Store(height)
+	return s, height, nil
+}
+
+// after is the height of the block after height, at most the largest height a draft can name.
+func after(height uint64) uint32 {
+	if height >= math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(height) + 1
+}
+
+// nextHeight is the height of the network's next block, as of the last status the connection
+// read.
+func (n *Network) nextHeight() uint32 {
+	return after(n.height.Load())
 }
 func (n *Network) Transaction(ctx context.Context, id string) (*Transaction, error) {
 	var t *Transaction

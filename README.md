@@ -110,11 +110,14 @@ never `floor`, and the floor beside it is for display only. Show such a fee as a
 as the network's minimum. A connected reader uses `Network.DeserializeDraft` and
 `Network.SignDraft`, which read the draft on the chain the connection loaded, as the Rust,
 WebAssembly and Tauri hosts do: a draft built under another network configuration (another fee
-table, say) is refused with `NetworkMismatch` (`reason`: `configuration`), and a fee at that
-chain's floor reads `floor`. That floor is the one at the draft's height, which the builder chose;
-where a milestone between it and the network's next block changes the fee table, show the fee as
-an amount. A second key must belong to the same
-runtime as the primary key. Do not mutate exported account metadata or a profile during a call.
+table, say) is refused with `NetworkMismatch` (`reason`: `configuration`). The floor is the one
+at the draft's height, which the builder chose, so they also give the core the height of the
+network's next block, as of the connection's last status read (`Connect`, `Refresh`, `Status` or
+`Build`; a lower height than before is followed too): a fee at the draft's floor reads `floor`
+when the floor of that block is the same, and `unverified`, with the floor kept for display,
+when a milestone between the two heights changes the fee table. A second key must belong to the
+same runtime as the primary key. Do not mutate exported account metadata or a profile during a
+call.
 
 The runtime has a 512 MiB linear-memory ceiling and a 16 MiB JSON limit. No filesystem or network
 is exposed to production WebAssembly. WASI randomness comes from `crypto/rand.Reader`. Key

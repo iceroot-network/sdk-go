@@ -239,3 +239,115 @@ func TestADraftIsReadOnTheConnectionsChain(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// loweredFeeRelay is a relay of the devnet fixtures whose chain lowers the minimum fee at height
+// 90, and whose node reports the height in height.
+func loweredFeeRelay(t *testing.T, height *atomic.Uint64) *testRelay {
+	t.Helper()
+	data, err := os.ReadFile("testdata/node/node-configuration-crypto.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crypto map[string]any
+	if err = DecodeJSON(data, &crypto); err != nil {
+		t.Fatal(err)
+	}
+	milestones := crypto["data"].(map[string]any)["milestones"].([]any)
+	var lowered map[string]any
+	if err = DecodeJSON(must(json.Marshal(milestones[len(milestones)-1])), &lowered); err != nil {
+		t.Fatal(err)
+	}
+	lowered["height"] = 90
+	lowered["dynamicFees"].(map[string]any)["minFee"] = 3000
+	crypto["data"].(map[string]any)["milestones"] = append(milestones, lowered)
+	answer := must(json.Marshal(crypto))
+	return newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		switch r.URL.Path {
+		case "/api/node/configuration/crypto":
+			_, _ = w.Write(answer)
+		case "/api/node/status":
+			fmt.Fprintf(w, `{"data":{"synced":true,"now":%d,"blocksCount":0,"timestamp":634}}`, height.Load())
+		default:
+			return false
+		}
+		return true
+	})
+}
+
+// must is value, and panics on err.
+func must[T any](value T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func TestADraftsFeeIsTheFloorOnlyAtTheNetworksNextHeight(t *testing.T) {
+	ctx := context.Background()
+	s := testSDK(t)
+	var height atomic.Uint64
+	height.Store(80)
+	relay := loweredFeeRelay(t, &height)
+	net, err := s.Connect(ctx, Devnet(relay.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.FromLegacyPassphrase(ctx, net.Profile(), "probe passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Release(ctx)
+	build := func(at uint32) (Draft, []byte) {
+		t.Helper()
+		d, err := s.BuildOffline(ctx, net.Profile(), net.configuration, transferTo(a.Address, "1"), OnlineFacts{Sender: a.PublicKey, Nonce: "1", Height: at})
+		if err != nil || d.Summary.Fee.Source != "floor" {
+			t.Fatal(d.Summary.Fee, err)
+		}
+		return d, must(d.Serialize())
+	}
+	read := func(data []byte, built Draft, source string) Draft {
+		t.Helper()
+		d, err := net.DeserializeDraft(ctx, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fee := d.Summary.Fee; fee.Source != source || fee.Amount != built.Summary.Fee.Amount || *fee.Floor != *built.Summary.Fee.Floor {
+			t.Fatalf("at the node's height %d: fee %s %s %s, want %s", height.Load(), fee.Amount, fee.Source, *fee.Floor, source)
+		}
+		return d
+	}
+	before, early := build(81)
+	after, late := build(90)
+	if before.Summary.Fee.Amount == after.Summary.Fee.Amount {
+		t.Fatal("the fee table did not change", before.Summary.Fee)
+	}
+
+	// At height 80 the next block is 81, before the change: a draft of that height is at the
+	// network's floor, and one past the change is not.
+	read(early, before, "floor")
+	read(late, after, "unverified")
+	// At 89 the next block is 90, where the floor is lower.
+	height.Store(89)
+	if _, err = net.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := read(early, before, "unverified")
+	read(late, after, "floor")
+	// The fee's source does not stop signing.
+	if signed, err := net.SignDraft(ctx, d, a, nil); err != nil || !signed.Verified {
+		t.Fatal(signed, err)
+	}
+	// The node's status is its own word: a lower height is followed too.
+	height.Store(80)
+	if _, err = net.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	read(early, before, "floor")
+	read(late, after, "unverified")
+
+	// The core reads a height only with the host's chain.
+	err = s.call(ctx, "draftRead", map[string]any{"profile": net.Profile(), "serialized": hex.EncodeToString(early), "height": 81}, nil)
+	if errorCode(err) != "InvalidArgument" {
+		t.Fatal(err)
+	}
+}

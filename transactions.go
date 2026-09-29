@@ -49,23 +49,34 @@ func (s *SDK) DeserializeDraft(ctx context.Context, p Profile, data []byte) (Dra
 
 // DeserializeDraft reads a serialized draft on the connection's chain: a draft built under another
 // network configuration (another fee table, other rules or other labels) is refused with
-// NetworkMismatch, whose details name the reason "configuration", and a fee at the floor of this
-// chain reads "floor". That floor is the one at the draft's height, which the builder chose: where
-// a milestone between it and the network's next block changes the fee table, show the fee as an
-// amount.
+// NetworkMismatch, whose details name the reason "configuration". The floor is computed at the
+// draft's height, which the builder chose, and a fee at it reads "floor" only when the floor of
+// the network's next block is the same. That block is the one after the node's height as of the
+// connection's last status read (Connect, Refresh, Status or Build). When a milestone between the
+// two heights changes the fee table, the fee reads "unverified", with the floor at the draft's
+// height kept for display: show it as an amount, never as the network's minimum.
 func (n *Network) DeserializeDraft(ctx context.Context, data []byte) (Draft, error) {
-	return n.sdk.readDraft(ctx, n.profile, n.configuration, data)
+	return n.sdk.readDraft(ctx, n.profile, n, data)
 }
 
-// readDraft reads data for p, on the chain of configuration when it is given.
-func (s *SDK) readDraft(ctx context.Context, p Profile, configuration json.RawMessage, data []byte) (Draft, error) {
+// readDraft reads data for p, on the chain of the connection on when it is given.
+func (s *SDK) readDraft(ctx context.Context, p Profile, on *Network, data []byte) (Draft, error) {
 	d := Draft{Serialized: hex.EncodeToString(data)}
 	args := map[string]any{"profile": p, "serialized": d.Serialized}
-	if configuration != nil {
-		args["configuration"] = configuration
-	}
+	on.chain(args)
 	err := s.call(ctx, "draftRead", args, &d.Summary)
 	return d, err
+}
+
+// chain adds to the arguments of a draft's read the connection's chain and the height of the
+// network's next block, at which the core judges the draft's floor. A nil connection adds nothing:
+// the draft is read with the profile alone.
+func (n *Network) chain(args map[string]any) {
+	if n == nil {
+		return
+	}
+	args["configuration"] = n.configuration
+	args["height"] = n.nextHeight()
 }
 func (d Draft) Serialize() ([]byte, error) { return hex.DecodeString(d.Serialized) }
 
@@ -75,23 +86,21 @@ func (d Draft) Sign(ctx context.Context, p Profile, key, second *Account) (Signe
 	return d.sign(ctx, p, nil, key, second)
 }
 
-// SignDraft signs d as Draft.Sign does, reading it on the connection's chain: a draft built under
-// another network configuration is refused with NetworkMismatch before anything is signed. The
-// keys may belong to another runtime than the connection's.
+// SignDraft signs d as Draft.Sign does, reading it on the connection's chain as DeserializeDraft
+// does: a draft built under another network configuration is refused with NetworkMismatch before
+// anything is signed. The keys may belong to another runtime than the connection's.
 func (n *Network) SignDraft(ctx context.Context, d Draft, key, second *Account) (SignedTransaction, error) {
-	return d.sign(ctx, n.profile, n.configuration, key, second)
+	return d.sign(ctx, n.profile, n, key, second)
 }
 
-// sign signs d for p, on the chain of configuration when it is given.
-func (d Draft) sign(ctx context.Context, p Profile, configuration json.RawMessage, key, second *Account) (SignedTransaction, error) {
+// sign signs d for p, on the chain of the connection on when it is given.
+func (d Draft) sign(ctx context.Context, p Profile, on *Network, key, second *Account) (SignedTransaction, error) {
 	var out SignedTransaction
 	if key == nil {
 		return out, &Error{Code: "InvalidKey", Message: "signing account is required"}
 	}
 	args := map[string]any{"profile": p, "serialized": d.Serialized, "key": key.handle}
-	if configuration != nil {
-		args["configuration"] = configuration
-	}
+	on.chain(args)
 	if second != nil {
 		if second.sdk != key.sdk {
 			return out, &Error{Code: "InvalidKey", Message: "second key belongs to another runtime"}
