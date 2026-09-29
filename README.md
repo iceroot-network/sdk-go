@@ -48,7 +48,12 @@ with read access. Private dependencies can use `GOPRIVATE=github.com/iceroot-net
   the phrase.
 - `ParseAmount`, `FormatAmount`, `ValidateAddress`, `AddressFromPublicKey`: core validation.
   `Amount` is a decimal integer string in base units; neither amounts nor nonces use floats.
-- `SignMessage`, `VerifyMessage`, `BuildSignIn`, `ParseSignIn`: shared message formats.
+- `SignMessage`, `VerifyMessage`, `BuildSignIn`, `ParseSignIn`, `Account.SignSignIn`: shared
+  message formats. A message is UTF-8 text: other bytes are refused with `InvalidArgument`, since
+  in today's format a message signature over a transaction's bytes would sign that transaction.
+  Text whose first line is an ownership proof's is refused too. Sign a website's sign-in message
+  with `SignSignIn`, which signs only once the message passes its checks against the page's
+  origin, the account and the time; a refusal is `InvalidSignIn`.
 - `Connect`, `Network.Build`, `Draft.Sign`, `Network.Submit`: node facts, portable drafts,
   isolated signing and pool outcomes. Transfer, vote, vote withdrawal, burn, second-key
   registration, validator registration and resignation use `BuildRequest.Operation`.
