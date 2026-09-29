@@ -78,8 +78,10 @@ and request headers. Submission reports preserve per-transaction refusals; trans
 a submission can mean uncertain acceptance, so query its id before retrying.
 
 The transport keeps the core's bounds (`transportLimits`), as its Rust and TypeScript clients do.
-A relay is unavailable for a request when it cannot be reached, when it declares or sends an
-answer longer than 8 MiB, or when it stays rate limited:
+A relay is unavailable for a request when it cannot be reached, when it answers with a redirect,
+which is never followed, or with a server error (HTTP 5xx), when it declares or sends an answer
+longer than 8 MiB, or when it stays rate limited. When no other relay answers, the error is the
+last relay's, and a server error is the core's reading of that answer (`Refused`):
 
 - Answers are read as the relay sends them and never decompressed: every request names
   `Accept-Encoding: identity`, which also stops Go's transport, or an application's, from

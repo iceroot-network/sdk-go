@@ -399,6 +399,66 @@ func TestAnUnavailableRelayIsSkipped(t *testing.T) {
 	}
 }
 
+func TestARelayThatAnswersWithAServerErrorOrARedirectIsSkipped(t *testing.T) {
+	s := testSDK(t)
+	elsewhere := newTestRelay(t, nil)
+	var mode atomic.Value
+	mode.Store("")
+	first := newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {
+		switch mode := mode.Load().(string); {
+		case mode == "503" || (mode == "503 status" && r.URL.Path == "/api/node/status"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"statusCode":503,"error":"Service Unavailable","message":"busy"}`))
+			return true
+		case mode == "redirect" && r.URL.Path == "/api/node/status":
+			http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusFound)
+			return true
+		}
+		return false
+	})
+	second := newTestRelay(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	profile := Devnet(first.URL+"/api", second.URL+"/api")
+	net, err := s.Connect(ctx, profile, ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A server error, then a redirect, which is never followed: the next relay answers.
+	for i, value := range []string{"503 status", "redirect"} {
+		mode.Store(value)
+		if status, err := net.Status(ctx); err != nil || status.Height != "80" {
+			t.Fatalf("%s: %v %v", value, status, err)
+		}
+		if second.asked("/api/node/status") != i+1 {
+			t.Fatal(value, second.requests())
+		}
+	}
+	if asked := elsewhere.requests(); len(asked) != 0 {
+		t.Fatal("the redirect was followed", asked)
+	}
+	// Connecting moves on from a relay that answers with a server error.
+	mode.Store("503")
+	if _, err = s.Connect(ctx, profile, ConnectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// With no other relay, the server error is what the core reads from the answer.
+	mode.Store("")
+	only, err := s.Connect(ctx, Devnet(first.URL+"/api"), ConnectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode.Store("503 status")
+	if _, err = only.Status(ctx); errorCode(err) != "Refused" {
+		t.Fatal(err)
+	}
+	mode.Store("redirect")
+	if _, err = only.Status(ctx); errorCode(err) != "NodeUnavailable" || !strings.Contains(err.Error(), "redirect") {
+		t.Fatal(err)
+	}
+}
+
 func TestConnectSkipsARelayThatStaysRateLimited(t *testing.T) {
 	s := testSDK(t)
 	first := newTestRelay(t, func(w http.ResponseWriter, r *http.Request) bool {

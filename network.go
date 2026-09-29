@@ -24,7 +24,7 @@ type HTTPDoer interface {
 }
 
 // ConnectOptions configure a connection. HTTP defaults to a client with a 30-second timeout that
-// follows no redirect. Headers are sent with every request, except Accept-Encoding, which is always
+// follows no redirect; a relay that answers with one is unavailable for the request. Headers are sent with every request, except Accept-Encoding, which is always
 // identity so that answers are read as sent. PollInterval spaces the reads of WaitConfirmed and
 // WaitFinal (default 2 seconds).
 type ConnectOptions struct {
@@ -149,6 +149,10 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 		}
 		args := map[string]any{"profile": p, "status": crypto.Status, "headers": crypto.Headers, "body": crypto.Body}
 		if err = s.call(ctx, "chainNode", args, &n.info); err != nil {
+			if serverError(crypto) {
+				last = err
+				continue
+			}
 			return nil, err
 		}
 		var configuration struct {
@@ -166,6 +170,10 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 		}
 		args = map[string]any{"profile": n.profile, "configuration": n.configuration, "status": response.Status, "headers": response.Headers, "body": response.Body}
 		if err = s.call(ctx, "chainCheck", args, &n.node); err != nil {
+			if serverError(response) {
+				last = err
+				continue
+			}
 			return nil, err
 		}
 		if _, err = n.Refresh(ctx); err != nil {
@@ -224,30 +232,45 @@ func (n *Network) throttle(ctx context.Context) error {
 }
 
 // send sends request through the connection's relay. When that relay is unavailable for it (it
-// cannot be reached, its answer is longer than the core's limit, or it stays rate limited), the
-// profile's other relays are tried in order, each once its node configuration names the
-// connection's chain. A relay of another chain is never asked again. The error is the last
-// relay's. While connecting, only the relay being connected to is asked.
+// cannot be reached, answers with a redirect or a server error, its answer is longer than the
+// core's limit, or it stays rate limited), the profile's other relays are tried in order, each
+// once its node configuration names the connection's chain. A relay of another chain is never
+// asked again. The outcome is the last relay's: its error, or its server error's answer for the
+// core to read. While connecting, only the relay being connected to is asked.
 func (n *Network) send(ctx context.Context, request nodeRequest) (nodeResponse, error) {
 	if !n.connected {
 		return n.attempt(ctx, n.relays[n.current], request)
 	}
 	var last error
+	var answer *nodeResponse
 	for _, i := range n.order() {
 		if err := n.identify(ctx, i); err != nil {
 			if ctx.Err() != nil {
 				return nodeResponse{}, ctx.Err()
 			}
-			last = err
+			last, answer = err, nil
 			continue
 		}
 		response, err := n.attempt(ctx, n.relays[i], request)
+		if err == nil && serverError(response) {
+			last, answer = nil, &response
+			continue
+		}
 		if code := errorCode(err); err == nil || (code != "NodeUnavailable" && code != "RateLimited") {
 			return response, err
 		}
-		last = err
+		last, answer = err, nil
+	}
+	if answer != nil {
+		return *answer, nil
 	}
 	return nodeResponse{}, last
+}
+
+// serverError reports whether response is a server error (HTTP 5xx), which makes its relay
+// unavailable for the request, as the core's HTTP client reads it.
+func serverError(response nodeResponse) bool {
+	return response.Status >= 500
 }
 
 // order is the connection's relay, then the profile's other relays, each once.
@@ -373,6 +396,12 @@ func (n *Network) fetch(ctx context.Context, relay string, request nodeRequest) 
 			return nodeResponse{}, ctx.Err()
 		}
 		return nodeResponse{}, unavailable(request.Method+" "+url, err)
+	}
+	// A redirect would take the request to a host the profile does not name: the relay is
+	// unavailable for the request, as one that cannot be reached, and its body is not read.
+	if res.StatusCode >= 300 && res.StatusCode < 400 {
+		_ = res.Body.Close()
+		return nodeResponse{}, &Error{Code: "NodeUnavailable", Message: fmt.Sprintf("%s %s answered with a redirect (HTTP %d), which the connection does not follow", request.Method, url, res.StatusCode)}
 	}
 	data, err := n.read(ctx, res, request.Method+" "+url)
 	if err != nil {
