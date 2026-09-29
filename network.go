@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // HTTPDoer allows an application to inject its transport.
@@ -362,7 +364,7 @@ func (n *Network) fetch(ctx context.Context, relay string, request nodeRequest) 
 		if ctx.Err() != nil {
 			return nodeResponse{}, ctx.Err()
 		}
-		return nodeResponse{}, &Error{Code: "NodeUnavailable", Message: err.Error()}
+		return nodeResponse{}, unavailable(request.Method+" "+url, err)
 	}
 	data, err := n.read(ctx, res, request.Method+" "+url)
 	if err != nil {
@@ -394,12 +396,46 @@ func (n *Network) read(ctx context.Context, res *http.Response, what string) ([]
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, &Error{Code: "NodeUnavailable", Message: err.Error()}
+		return nil, unavailable(what, err)
 	}
 	if int64(len(data)) > limit {
 		return nil, tooLong(fmt.Sprintf("%d or more", len(data)))
 	}
 	return data, nil
+}
+
+// unavailable is NodeUnavailable for the request what, which failed with cause. The message is the
+// SDK's own. The transport's reason can quote what the relay sent (a line that is not HTTP, or the
+// names in its certificate), so it is kept in the details alone, as reason, and as the core keeps a
+// node's text there: escaped and cut to 200 characters.
+func unavailable(what string, cause error) error {
+	details, _ := json.Marshal(map[string]string{"reason": nodeText(cause.Error())})
+	return &Error{Code: "NodeUnavailable", Message: what + " failed; the transport's reason is in the details", Details: details}
+}
+
+// maxNodeText is the most characters of a relay's own text an error keeps, as in the core.
+const maxNodeText = 200
+
+// nodeText is text a relay chose, as an error keeps it: control, format and separator characters,
+// which can hide or reorder what is shown, written as escapes (\u{202e}), as are bytes that are
+// not UTF-8, and at most maxNodeText characters, escapes included, then "…".
+func nodeText(text string) string {
+	var out strings.Builder
+	count := 0
+	for _, r := range text {
+		piece := string(r)
+		if r == utf8.RuneError || unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) || (r > unicode.MaxASCII && unicode.Is(unicode.Zs, r)) {
+			piece = fmt.Sprintf("\\u{%x}", r)
+		}
+		width := utf8.RuneCountInString(piece)
+		if count+width > maxNodeText {
+			out.WriteString("…")
+			break
+		}
+		count += width
+		out.WriteString(piece)
+	}
+	return out.String()
 }
 
 // prepare has the core write the request of a node API operation.

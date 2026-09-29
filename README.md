@@ -83,6 +83,10 @@ answer longer than 8 MiB, or when it stays rate limited:
   the node's `Retry-After` in whole seconds when that is longer. A relay that asks for more than
   a minute, or whose retries are spent, is not waited for. When no other relay answers, the error
   is `RateLimited`, with the node's `retryAfterSeconds` in its details.
+- A relay's own text stays out of error messages. A request the transport cannot complete is
+  `NodeUnavailable` with a message of the SDK's own; the transport's reason, which can quote what
+  the relay sent, is only in the details (`reason`), escaped and cut to 200 characters, as the
+  core keeps a node's text.
 
 Use `Network.Build` for current nonce, next height, second-key state and minimum fees. The
 lower-level `BuildOffline` takes explicit facts for offline protocols and tests. Applications must

@@ -1,11 +1,14 @@
 package iceroot
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	stdnet "net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // answerLimit is the core's limit on the answer a relay may send (8 MiB).
@@ -408,5 +412,72 @@ func TestConnectSkipsARelayThatStaysRateLimited(t *testing.T) {
 	before := len(first.paths)
 	if _, err = net.Status(ctx); err != nil || len(first.paths) != before {
 		t.Fatal(err, first.paths)
+	}
+}
+
+func TestARelaysOwnTextStaysOutOfErrors(t *testing.T) {
+	s := testSDK(t)
+	// A relay that answers with text that is not HTTP: Go's transport quotes it in its error.
+	listener, err := stdnet.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_, _ = bufio.NewReader(conn).ReadString('\n')
+				_, _ = conn.Write([]byte("RELAY-TEXT‮" + strings.Repeat("A", 5000) + "\r\n\r\n"))
+			}()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = s.Connect(ctx, Devnet("http://"+listener.Addr().String()+"/api"), ConnectOptions{})
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "NodeUnavailable" {
+		t.Fatal(err)
+	}
+	if strings.Contains(e.Error(), "RELAY-TEXT") || strings.Contains(e.Error(), "AAAA") {
+		t.Fatalf("the relay's text is in the message: %.300s", e.Error())
+	}
+	// The transport's reason is kept in the details, escaped and cut to 200 characters.
+	var details struct {
+		Reason string `json:"reason"`
+	}
+	if err = json.Unmarshal(e.Details, &details); err != nil {
+		t.Fatal(err, string(e.Details))
+	}
+	if n := utf8.RuneCountInString(details.Reason); n > 201 || !strings.HasSuffix(details.Reason, "…") ||
+		!strings.Contains(details.Reason, "RELAY-TEXT") || strings.ContainsRune(details.Reason, '‮') {
+		t.Fatalf("reason of %d characters: %s", n, details.Reason)
+	}
+}
+
+func TestNodeText(t *testing.T) {
+	for text, want := range map[string]string{
+		"plain text":           "plain text",
+		"a‮b\nc":               `a\u{202e}b\u{a}c`,
+		"a­b c":                `a\u{ad}b\u{2003}c`,
+		"":                     "",
+		"\xff":                 `\u{fffd}`,
+		strings.Repeat("é", 5): strings.Repeat("é", 5),
+	} {
+		if got := nodeText(text); got != want {
+			t.Errorf("nodeText(%q) = %q, want %q", text, got, want)
+		}
+	}
+	long := nodeText(strings.Repeat("é", 500))
+	if utf8.RuneCountInString(long) != 201 || !strings.HasSuffix(long, "…") {
+		t.Fatal(long)
+	}
+	// An escape is not cut: it is left out whole.
+	if cut := nodeText(strings.Repeat("x", 195) + "‮"); cut != strings.Repeat("x", 195)+"…" {
+		t.Fatal(cut)
 	}
 }
