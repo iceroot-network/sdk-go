@@ -33,7 +33,7 @@ func (s *SDK) ParseSignIn(ctx context.Context, p Profile, message string, expect
 // SignSignIn signs a website's sign-in message for the page of origin, as the browser reports
 // it, at now. The core first checks the message against that origin, this account's public key and
 // address, and the times it names, and signs only when every check passes; a refusal is
-// InvalidSignIn with its reason. Sign a sign-in this way, never through SignMessage.
+// InvalidSignIn with its reason. SignMessage refuses a sign-in message with InvalidArgument.
 func (a *Account) SignSignIn(ctx context.Context, message, origin string, now time.Time) (MessageSignature, error) {
 	var out MessageSignature
 	err := a.sdk.call(ctx, "signinSign", map[string]any{"key": a.handle, "message": message, "origin": origin, "now": now.UnixMilli()}, &out)

@@ -48,6 +48,11 @@ func (s *SDK) FromLegacyPassphrase(ctx context.Context, p Profile, passphrase st
 func (a *Account) Release(ctx context.Context) error {
 	return a.sdk.call(ctx, "keyRelease", map[string]any{"key": a.handle}, nil)
 }
+
+// SignMessage signs UTF-8 text only. It refuses with InvalidArgument other bytes (which may
+// be a transaction's), text whose first line is an ownership proof's, and a website's sign-in
+// message. Sign-in text is any text the sign-in parser accepts for some network, origin, account
+// and time, including a lapsed challenge. Sign a website's sign-in message with SignSignIn.
 func (a *Account) SignMessage(ctx context.Context, message []byte) (MessageSignature, error) {
 	var out MessageSignature
 	err := a.sdk.call(ctx, "signMessage", map[string]any{"key": a.handle, "message": hex.EncodeToString(message)}, &out)
