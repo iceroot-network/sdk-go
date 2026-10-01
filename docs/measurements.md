@@ -5,13 +5,14 @@ clang 16. Source builds use the release flags in `scripts/build-wasm.sh`. These 
 BIP340 measurements; a later post-quantum core must be measured again. The machine also runs
 other work, so timings are observations rather than service guarantees.
 
-The embedded production module is 1,182,472 bytes, or 402,442 bytes with `gzip -n -9`.
+The embedded production module is 1,183,833 bytes, or 403,067 bytes with `gzip -n -9`.
 Its checksum is in `internal/wasm/SHA256SUMS`, and the sdk-rust revision it was built from in
 `internal/wasm/SOURCE`; a build of that revision from a clean export, at another path and with an
 empty target directory, gave the same bytes. It includes key derivation, transaction handling,
 node response mapping, the vote library and keystores. Fixed signing randomness is unavailable
 in this artifact and is tested as a rejection.
 
+With the module built from sdk-rust e3904dd,
 `go test -run '^$' -bench BenchmarkSign -benchtime=3s -count=3 .` measured:
 
 | Operation | Three runs, milliseconds per operation | Median throughput |
@@ -25,6 +26,9 @@ bytes, id and summary. HTTP and account derivation are excluded. Calls within an
 serialized; use multiple instances for parallel work. These results support retaining the pure
 Go host for classical signing; the application must measure its own concurrency and workload.
 
+This module was not measured on an idle machine; run in turn with the e3904dd module on a busy
+one, it signed a message just as fast.
+
 Validation:
 
 - Go 1.26.8 and 1.27.1 pass the Go tests and static checks, and so does the race detector.
@@ -37,17 +41,17 @@ Validation:
 - The vote mode tests also check the synthetic snapshot's expected pools, scores and selections;
   69 node API fixtures run through WASI as well.
 - 10,000 core cases and 10,000 random vote snapshots produce 37,237 byte-identical native Rust
-  and Go/WASI responses. The TypeScript comparison matches 1,000 legacy keys and fixed-aux
-  message signatures plus 1,000 phrase-derived accounts.
+  and Go/WASI responses. With an earlier module, the TypeScript comparison matched 1,000 legacy
+  keys and fixed-aux message signatures plus 1,000 phrase-derived accounts.
 - The production artifact tests cover offline address pools, every supported operation,
   portable drafts across runtimes, wrong networks, released keys, concurrent callers, keystore
   opening, cancellation, response bounds, rate-limit waits and finality refusal. Memory tests
   search the instance for input phrases and passwords (as text and as the hex they cross in) and
   for released secret scalars, including after map growth and deletion, and check that
   cancellation wipes the interrupted instance.
-- The custodian executable ran on a fresh classical devnet: funding, withdrawal submission and
-  inclusion succeeded, and the recipient received exactly 100,000,000 base units. The chain was
-  stopped at height 4.
+- With an earlier module, the custodian executable ran on a fresh classical devnet: funding,
+  withdrawal submission and inclusion succeeded, and the recipient received exactly 100,000,000
+  base units. The chain was stopped at height 4.
 
 A run that waits for `finalized: true` needs a network with finality, which this core does not
 have yet: it has only the classical backend and reports no finality capability, so the example
