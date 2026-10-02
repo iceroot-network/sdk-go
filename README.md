@@ -9,7 +9,8 @@ This version uses `heartwood-crypto` at `crypto-v0.1.0` and supports the classic
 Post-quantum profiles, names, assets, swaps and finality remain unavailable until the core
 implements them. Capabilities report that accurately. `WaitFinal` fails with
 `UnsupportedOnNetwork` on the classical devnet; `WaitConfirmed` means inclusion only and must
-not be used to credit finalized deposits.
+not be used to credit finalized deposits. The first public testnet opens once finality is live; its
+profile will be added when that genesis is fixed.
 
 ```go
 package main
