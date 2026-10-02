@@ -147,6 +147,11 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 		n.current = i
 		crypto, err := n.exchange(ctx, "cryptoConfiguration", map[string]any{})
 		if err != nil {
+			// A relay whose answer the transport refuses (BadResponse) did answer: connecting
+			// stops there, as it does when the core refuses an answer.
+			if errorCode(err) == "BadResponse" {
+				return nil, err
+			}
 			last = err
 			continue
 		}
@@ -168,6 +173,9 @@ func (s *SDK) Connect(ctx context.Context, p Profile, o ConnectOptions) (*Networ
 		n.profile = n.info.Profile
 		response, err := n.exchange(ctx, "nodeConfiguration", map[string]any{})
 		if err != nil {
+			if errorCode(err) == "BadResponse" {
+				return nil, err
+			}
 			last = err
 			continue
 		}
@@ -404,6 +412,17 @@ func (n *Network) fetch(ctx context.Context, relay string, request nodeRequest) 
 	data, err := n.read(ctx, res, request.Method+" "+url)
 	if err != nil {
 		return nodeResponse{}, err
+	}
+	// The core reads a body as UTF-8 text, and JSON would carry other bytes to it as U+FFFD. A
+	// successful answer that is not UTF-8 is refused here as the core refuses it. An error status
+	// keeps its meaning, without the body's text, which the core does not read either.
+	if !utf8.Valid(data) {
+		if res.StatusCode >= 200 && res.StatusCode < 300 {
+			reason := fmt.Sprintf("HTTP %d: not UTF-8", res.StatusCode)
+			details, _ := json.Marshal(map[string]string{"reason": reason})
+			return nodeResponse{}, &Error{Code: "BadResponse", Message: "the node's response cannot be used: " + reason, Details: details}
+		}
+		data = nil
 	}
 	response := nodeResponse{Status: uint16(res.StatusCode), Body: string(data), Headers: make([][2]string, 0, len(res.Header))}
 	for k, values := range res.Header {
