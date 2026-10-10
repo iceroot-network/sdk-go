@@ -72,6 +72,8 @@ jobs:
       # The committed module was built with clang 16: the same compiler gives the same bytes.
       CC_wasm32_wasip1: clang-16
       AR_wasm32_wasip1: llvm-ar-16
+      # wasi-libc supplies the C headers for the wasip1 build; the package keeps them outside clang's search path.
+      CFLAGS_wasm32_wasip1: -isystem /usr/include/wasm32-wasi
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -103,8 +105,8 @@ jobs:
           cache-dependency-path: sdk-go/go.sum
       - name: Install clang and llvm-ar for the WebAssembly build
         run: |
-          command -v clang-16 >/dev/null && command -v llvm-ar-16 >/dev/null ||
-            (sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-16 llvm-16)
+          command -v clang-16 >/dev/null && command -v llvm-ar-16 >/dev/null && [ -d /usr/include/wasm32-wasi ] ||
+            (sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-16 llvm-16 wasi-libc)
       - name: The embedded module rebuilds to the same bytes
         working-directory: sdk-go
         run: |

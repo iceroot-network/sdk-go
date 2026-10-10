@@ -8,7 +8,8 @@ beside this repository, or set `SDK_RUST_DIR` to its checkout.
 ## Rebuild the embedded module
 
 Use the Rust checkout's pinned Rust 1.98.0 toolchain and lockfile, plus clang and llvm-ar
-with WebAssembly support. CI uses clang 16 and llvm-ar 16 for the artifact rebuild.
+with WebAssembly support, and the WASI C headers (the `wasi-libc` package on Debian and Ubuntu).
+CI uses clang 16 and llvm-ar 16 for the artifact rebuild.
 The classical core compiles libsecp256k1 from C when building the artifact.
 Go applications can still build with `CGO_ENABLED=0`.
 
