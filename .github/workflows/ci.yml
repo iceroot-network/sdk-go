@@ -92,7 +92,6 @@ jobs:
           repository: iceroot-network/sdk-rust
           ref: ${{ steps.source.outputs.revision }}
           path: sdk-rust
-          token: ${{ secrets.SDK_READ_TOKEN || github.token }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -106,10 +105,6 @@ jobs:
         run: |
           command -v clang-16 >/dev/null && command -v llvm-ar-16 >/dev/null ||
             (sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-16 llvm-16)
-      - name: Read access to heartwood-core
-        env:
-          HEARTWOOD_TOKEN: ${{ secrets.HEARTWOOD_TOKEN }}
-        run: sdk-rust/tools/ci/heartwood-access.sh
       - name: The embedded module rebuilds to the same bytes
         working-directory: sdk-go
         run: |
