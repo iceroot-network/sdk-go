@@ -2,8 +2,8 @@
 
 ## Embedded module size
 
-Measured from the committed artifact on 2026-10-10 UTC: 1,183,833 bytes uncompressed
-and 403,605 bytes with gzip at level 9 and no timestamp.
+Measured from the committed artifact on 2026-10-10 UTC: 1,185,663 bytes uncompressed
+and 403,584 bytes with gzip at level 9 and no timestamp.
 Reproduce the size check with:
 
 ```sh
